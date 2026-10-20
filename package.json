@@ -1,5 +1,5 @@
 {
-  "name": "cairn",
+  "name": "@samux855/cairn",
   "version": "1.0.0",
   "description": "Scans configured Git repositories daily and safely commits and pushes real changes",
   "type": "module",
@@ -31,5 +31,8 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
