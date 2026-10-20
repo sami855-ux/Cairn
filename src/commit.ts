@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { SimpleGit } from 'simple-git';
 import type { FileChange } from './types.js';
 
+const GENERIC = /^(page|layout|index|route|loading|error|template|default|middleware)\.[a-z0-9]+$/i;
 const DOC = /\.(md|mdx|txt|rst)$/i;
 const TEST = /(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[a-z]+$/i;
 const MAX_SUBJECT = 72;
@@ -12,13 +13,26 @@ export function inferType(changes: FileChange[]): string {
   return 'chore';
 }
 
+function tail(file: string, depth: number): string {
+  return file.split('/').slice(-depth).join('/');
+}
+
+export function displayNames(files: string[]): string[] {
+  const maxDepth = Math.max(...files.map((f) => f.split('/').length));
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    const names = files.map((f) => tail(f, GENERIC.test(path.posix.basename(f)) ? Math.max(depth, 2) : depth));
+    if (new Set(names).size === names.length) return names;
+  }
+  return files;
+}
+
 export function summarize(changes: FileChange[]): string {
   const verb = changes.every((c) => c.kind === 'added')
     ? 'add'
     : changes.every((c) => c.kind === 'deleted')
       ? 'remove'
       : 'update';
-  const names = changes.slice(0, 3).map((c) => path.posix.basename(c.path));
+  const names = displayNames(changes.slice(0, 3).map((c) => c.path));
   const rest = changes.length - names.length;
   let list: string;
   if (rest > 0) list = `${names.join(', ')} and ${rest} more`;
