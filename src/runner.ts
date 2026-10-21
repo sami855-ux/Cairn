@@ -1,3 +1,4 @@
+import { suggestMessage, truncateDiff } from './ai.js';
 import type { Config, RepoConfig } from './config.js';
 import { buildCommitMessage, commitChanges, splitChanges } from './commit.js';
 import { resolveRepoPath } from './paths.js';
@@ -56,10 +57,30 @@ async function inspect(repo: RepoConfig, config: Config, apply: boolean): Promis
     return report;
   }
 
+  const ai = config.commit.ai;
+  let aiAvailable = ai.enabled;
   for (const [index, group] of groups.entries()) {
+    const state: { used: boolean; error?: string } = { used: false };
+    const compose = aiAvailable
+      ? async (diff: string): Promise<string | null> => {
+          const result = await suggestMessage(ai, group.map((c) => c.path), truncateDiff(diff, ai.maxDiffBytes));
+          if ('message' in result) {
+            state.used = true;
+            return result.message;
+          }
+          state.error = result.error;
+          aiAvailable = false;
+          return null;
+        }
+      : undefined;
     try {
-      const sha = await commitChanges(git, group, messages[index]);
-      report.commits.push({ sha, message: messages[index] });
+      const done = await commitChanges(git, group, messages[index], compose);
+      report.commits.push({
+        sha: done.sha,
+        message: done.message,
+        source: state.used ? 'ai' : 'rules',
+        ...(state.error ? { aiError: state.error } : {}),
+      });
     } catch (error) {
       const detail = errorText(error);
       const reason =
