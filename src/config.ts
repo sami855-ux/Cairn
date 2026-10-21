@@ -44,6 +44,18 @@ const repoSchema = z
   })
   .strict();
 
+const aiSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    baseUrl: z.string().url().default('http://localhost:11434/v1'),
+    model: z.string().min(1).default('qwen2.5-coder:3b'),
+    apiKeyEnv: z.string().min(1).optional(),
+    apiKeyFile: z.string().min(1).optional(),
+    maxDiffBytes: z.number().int().positive().default(12000),
+    timeoutSeconds: z.number().int().positive().default(30),
+  })
+  .strict();
+
 const configSchema = z
   .object({
     dryRun: z.boolean().default(true),
@@ -58,6 +70,7 @@ const configSchema = z
         allowedPaths: z.array(z.string()).default(DEFAULT_ALLOWED_PATHS),
         split: z.enum(['none', 'file']).default('none'),
         maxCommitsPerRun: z.number().int().positive().default(20),
+        ai: aiSchema.default({}),
       })
       .strict()
       .default({}),
@@ -82,6 +95,7 @@ const configSchema = z
 
 export type Config = z.infer<typeof configSchema>;
 export type RepoConfig = z.infer<typeof repoSchema>;
+export type AiConfig = z.infer<typeof aiSchema>;
 
 export class ConfigError extends Error {}
 
@@ -106,7 +120,7 @@ export async function loadConfig(file: string = defaultConfigPath()): Promise<Co
     text = await fs.readFile(file, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new ConfigError(`no config at ${file}, run "cairn init" first`);
+      throw new ConfigError(`no config at ${file}, run "git-contribute init" first`);
     }
     throw error;
   }
