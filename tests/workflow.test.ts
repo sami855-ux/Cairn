@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config.js';
 import { withLock } from '../src/lock.js';
-import { processRepo } from '../src/runner.js';
+import { processRepo, runAll } from '../src/runner.js';
 import { git, identify, makeRepo, startMockAi, write } from './helpers.js';
 
 function run(dir: string, apply: boolean, overrides: Record<string, unknown> = {}) {
@@ -459,5 +459,176 @@ describe('AI commit messages', () => {
     write(dir, 'notes.md', 'hello\n');
     await run(dir, true, withAi(server.baseUrl));
     expect(JSON.stringify(server.requests[0].body)).not.toContain('ENVTOKEN789');
+  });
+});
+
+describe('offline pushes and pending commits', () => {
+  const config = (dir: string, extra: Record<string, unknown> = {}) => parseConfig({ repos: [{ path: dir }], ...extra });
+
+  async function goOffline(dir: string, root: string, run: { pending: string[] }) {
+    git(dir, 'remote', 'set-url', 'origin', path.join(root, 'missing.git'));
+    write(dir, 'a.ts', '1\n');
+    const cfg = config(dir);
+    return processRepo(cfg.repos[0], cfg, true, run);
+  }
+
+  it('commits while offline and publishes it once the network is back', async () => {
+    const { root, dir, remote } = makeRepo();
+    const run = { pending: [] as string[] };
+    const first = await goOffline(dir, root, run);
+    expect(first.status).toBe('committed');
+    expect(first.push?.status).toBe('failed');
+    expect(run.pending).toEqual([git(dir, 'rev-parse', 'HEAD')]);
+
+    const cfg = config(dir);
+    git(dir, 'remote', 'set-url', 'origin', remote);
+    const second = await processRepo(cfg.repos[0], cfg, true, run);
+    expect(second.status).toBe('clean');
+    expect(second.push?.status).toBe('pushed');
+    expect(run.pending).toEqual([]);
+    expect(git(remote, 'rev-parse', 'main')).toBe(git(dir, 'rev-parse', 'HEAD'));
+  });
+
+  it('pushes earlier offline commits together with a new one', async () => {
+    const { root, dir, remote } = makeRepo();
+    const run = { pending: [] as string[] };
+    await goOffline(dir, root, run);
+    git(dir, 'remote', 'set-url', 'origin', remote);
+    write(dir, 'b.ts', '2\n');
+    const cfg = config(dir);
+    const report = await processRepo(cfg.repos[0], cfg, true, run);
+    expect(report.status).toBe('committed');
+    expect(report.push?.detail).toMatch(/^2 commit/);
+    expect(git(remote, 'rev-parse', 'main')).toBe(git(dir, 'rev-parse', 'HEAD'));
+  });
+
+  it('never publishes commits cairn did not make during a retry', async () => {
+    const { root, dir, remote } = makeRepo();
+    const run = { pending: [] as string[] };
+    await goOffline(dir, root, run);
+    git(dir, 'remote', 'set-url', 'origin', remote);
+    write(dir, 'mine.ts', 'mine\n');
+    git(dir, 'add', 'mine.ts');
+    git(dir, 'commit', '-m', 'my own work');
+    const remoteHead = git(remote, 'rev-parse', 'main');
+    const cfg = config(dir);
+    const report = await processRepo(cfg.repos[0], cfg, true, run);
+    expect(report.status).toBe('clean');
+    expect(report.push?.status).toBe('skipped');
+    expect(report.push?.detail).toMatch(/not made by cairn/);
+    expect(git(remote, 'rev-parse', 'main')).toBe(remoteHead);
+  });
+
+  it('keeps pending commits when the remote moved ahead', async () => {
+    const { root, dir, remote } = makeRepo();
+    const run = { pending: [] as string[] };
+    await goOffline(dir, root, run);
+    const other = path.join(root, 'other');
+    git(root, 'clone', '-q', remote, other);
+    identify(other);
+    write(other, 'theirs.txt', 'x\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-m', 'theirs');
+    git(other, 'push', '-q');
+    git(dir, 'remote', 'set-url', 'origin', remote);
+    const cfg = config(dir);
+    const report = await processRepo(cfg.repos[0], cfg, true, run);
+    expect(report.push?.status).toBe('skipped');
+    expect(report.push?.detail).toMatch(/new commit/);
+    expect(run.pending).toHaveLength(1);
+  });
+});
+
+describe('runAll due scheduling', () => {
+  const at = (hour: number, minute = 0, day = 1) => new Date(2026, 0, day, hour, minute);
+  const stateFileFor = (root: string) => path.join(root, 'state.json');
+
+  it('runs each repo once a day at or after its own time', async () => {
+    const one = makeRepo();
+    const two = makeRepo();
+    const stateFile = stateFileFor(one.root);
+    const cfg = parseConfig({
+      schedule: { time: '12:00' },
+      repos: [{ path: one.dir }, { path: two.dir, time: '18:00' }],
+    });
+    write(one.dir, 'x.ts', '1\n');
+    write(two.dir, 'y.ts', '1\n');
+    const real = fs.realpathSync;
+    const tick = (now: Date) => runAll(cfg, { apply: true, due: true, now, stateFile });
+
+    expect(await tick(at(11, 59))).toEqual([]);
+    const noon = await tick(at(12));
+    expect(noon.map((r) => r.path)).toEqual([real(one.dir)]);
+    expect(noon[0].status).toBe('committed');
+    expect(await tick(at(12, 30))).toEqual([]);
+
+    const evening = await tick(at(19));
+    expect(evening.map((r) => r.path)).toEqual([real(two.dir)]);
+    expect(evening[0].status).toBe('committed');
+    expect(await tick(at(19, 15))).toEqual([]);
+
+    const nextDay = await tick(at(12, 5, 2));
+    expect(nextDay.map((r) => r.path)).toEqual([real(one.dir)]);
+    expect(nextDay[0].status).toBe('clean');
+  });
+
+  it('catches up after the computer was off at the scheduled time', async () => {
+    const { root, dir } = makeRepo();
+    const cfg = parseConfig({ repos: [{ path: dir, time: '09:00' }] });
+    write(dir, 'a.ts', '1\n');
+    const late = await runAll(cfg, { apply: true, due: true, now: at(16, 40), stateFile: stateFileFor(root) });
+    expect(late).toHaveLength(1);
+    expect(late[0].status).toBe('committed');
+  });
+
+  it('retries a failed push on the next check and stops once it succeeds', async () => {
+    const { root, dir, remote } = makeRepo();
+    const stateFile = stateFileFor(root);
+    const cfg = parseConfig({ repos: [{ path: dir, time: '00:00' }] });
+    git(dir, 'remote', 'set-url', 'origin', path.join(root, 'missing.git'));
+    write(dir, 'a.ts', '1\n');
+    const tick = (now: Date) => runAll(cfg, { apply: true, due: true, now, stateFile });
+
+    const first = await tick(at(9));
+    expect(first[0].push?.status).toBe('failed');
+    const second = await tick(at(9, 15));
+    expect(second).toHaveLength(1);
+    expect(second[0].status).toBe('clean');
+    expect(second[0].push?.status).toBe('failed');
+
+    git(dir, 'remote', 'set-url', 'origin', remote);
+    const third = await tick(at(9, 30));
+    expect(third[0].push?.status).toBe('pushed');
+    expect(git(remote, 'rev-parse', 'main')).toBe(git(dir, 'rev-parse', 'HEAD'));
+    expect(await tick(at(9, 45))).toEqual([]);
+  });
+
+  it('does not let a manual run use up the scheduled run', async () => {
+    const { root, dir } = makeRepo();
+    const stateFile = stateFileFor(root);
+    const cfg = parseConfig({ repos: [{ path: dir, time: '00:00' }] });
+    write(dir, 'a.ts', '1\n');
+    await runAll(cfg, { apply: true, now: at(10), stateFile });
+    write(dir, 'b.ts', '2\n');
+    const scheduled = await runAll(cfg, { apply: true, due: true, now: at(10, 30), stateFile });
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0].status).toBe('committed');
+  });
+
+  it('keeps dry run previews from using up the real run', async () => {
+    const { root, dir } = makeRepo();
+    const stateFile = stateFileFor(root);
+    const cfg = parseConfig({ repos: [{ path: dir, time: '00:00' }] });
+    write(dir, 'a.ts', '1\n');
+    expect(await runAll(cfg, { apply: false, due: true, now: at(10), stateFile })).toHaveLength(1);
+    expect(await runAll(cfg, { apply: false, due: true, now: at(10, 15), stateFile })).toEqual([]);
+    const real = await runAll(cfg, { apply: true, due: true, now: at(10, 30), stateFile });
+    expect(real[0].status).toBe('committed');
+  });
+
+  it('skips repos that are not enabled', async () => {
+    const { root, dir } = makeRepo();
+    const cfg = parseConfig({ repos: [{ path: dir, time: '00:00', enabled: false }] });
+    expect(await runAll(cfg, { apply: true, due: true, now: at(10), stateFile: stateFileFor(root) })).toEqual([]);
   });
 });

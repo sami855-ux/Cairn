@@ -33,7 +33,7 @@ describe('config', () => {
   it('round trips through disk and reports missing or broken files', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-config-'));
     const file = path.join(dir, 'nested', 'config.json');
-    await expect(loadConfig(file)).rejects.toThrow(/git-contribute init/);
+    await expect(loadConfig(file)).rejects.toThrow(/cairn init/);
     const config = parseConfig({ repos: [{ path: '/tmp/x', push: false }] });
     await saveConfig(config, file);
     expect(await loadConfig(file)).toEqual(config);
