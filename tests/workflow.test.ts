@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config.js';
 import { withLock } from '../src/lock.js';
 import { processRepo } from '../src/runner.js';
-import { git, identify, makeRepo, write } from './helpers.js';
+import { git, identify, makeRepo, startMockAi, write } from './helpers.js';
 
 function run(dir: string, apply: boolean, overrides: Record<string, unknown> = {}) {
   const config = parseConfig({ repos: [{ path: dir }], ...overrides });
@@ -349,5 +349,115 @@ describe('file by file commits', () => {
     expect(git(remote, 'rev-parse', 'main')).toBe(remoteHead);
     expect(git(dir, 'diff', '--cached', '--name-only')).toBe('');
     expect(git(dir, 'status', '--porcelain')).toContain('b.ts');
+  });
+});
+
+describe('AI commit messages', () => {
+  const servers: { close: () => Promise<void> }[] = [];
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => s.close()));
+  });
+
+  async function mockAi(reply: Parameters<typeof startMockAi>[0]) {
+    const server = await startMockAi(reply);
+    servers.push(server);
+    return server;
+  }
+
+  const withAi = (baseUrl: string, extra: Record<string, unknown> = {}) => ({
+    commit: { ai: { enabled: true, baseUrl, ...extra } },
+  });
+
+  it('uses the model message for the commit', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi(() => ({ content: 'feat: add the first constant' }));
+    write(dir, 'src/a.ts', 'export const a = 1;\n');
+    const report = await run(dir, true, withAi(server.baseUrl));
+    expect(report.status).toBe('committed');
+    expect(report.commits[0]).toMatchObject({ message: 'feat: add the first constant', source: 'ai' });
+    expect(git(dir, 'log', '-1', '--format=%s')).toBe('feat: add the first constant');
+    const prompt = server.requests[0].body.messages[1].content;
+    expect(prompt).toContain('src/a.ts');
+    expect(prompt).toContain('+export const a = 1;');
+  });
+
+  it('does not call the model in a dry run', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi(() => ({ content: 'feat: nope' }));
+    write(dir, 'a.ts', '1\n');
+    const report = await run(dir, false, withAi(server.baseUrl));
+    expect(report.commits[0].message).toBe('chore: add a.ts');
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it('falls back to the rule based message when the reply is unusable', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi(() => ({ content: 'sure, here you go' }));
+    write(dir, 'a.ts', '1\n');
+    const report = await run(dir, true, withAi(server.baseUrl));
+    expect(report.status).toBe('committed');
+    expect(report.commits[0]).toMatchObject({ message: 'chore: add a.ts', source: 'rules' });
+    expect(report.commits[0].aiError).toMatch(/valid commit message/);
+  });
+
+  it('falls back when the server is down and still pushes', async () => {
+    const { dir, remote } = makeRepo();
+    const server = await mockAi(() => ({ content: 'fix: gone' }));
+    const url = server.baseUrl;
+    await server.close();
+    servers.pop();
+    write(dir, 'a.ts', '1\n');
+    const report = await run(dir, true, withAi(url));
+    expect(report.commits[0].message).toBe('chore: add a.ts');
+    expect(report.push?.status).toBe('pushed');
+    expect(git(remote, 'rev-parse', 'main')).toBe(git(dir, 'rev-parse', 'HEAD'));
+  });
+
+  it('stops asking after the first failure in a run', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi(() => ({ status: 500 }));
+    for (const name of ['a', 'b', 'c']) write(dir, `${name}.ts`, `${name}\n`);
+    const report = await run(dir, true, { commit: { split: 'file', ai: { enabled: true, baseUrl: server.baseUrl } } });
+    expect(report.commits).toHaveLength(3);
+    expect(report.commits.every((c) => c.source === 'rules')).toBe(true);
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it('writes one message per commit in file by file mode', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi((request) => {
+      const prompt = request.body.messages[1].content;
+      return { content: prompt.includes('login.ts') ? 'feat: add login handler' : 'feat: add logout handler' };
+    });
+    write(dir, 'login.ts', 'export const login = 1;\n');
+    write(dir, 'logout.ts', 'export const logout = 1;\n');
+    const report = await run(dir, true, {
+      commit: { split: 'file', ai: { enabled: true, baseUrl: server.baseUrl } },
+    });
+    expect(report.commits.map((c) => c.message)).toEqual(['feat: add login handler', 'feat: add logout handler']);
+    expect(server.requests).toHaveLength(2);
+    expect(server.requests[0].body.messages[1].content).not.toContain('logout.ts');
+  });
+
+  it('keeps lock files and source maps out of the prompt', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi(() => ({ content: 'chore: update dependencies' }));
+    write(dir, 'package-lock.json', '{"lockfileVersion": "LOCKTOKEN123"}\n');
+    write(dir, 'bundle.js.map', 'MAPTOKEN456\n');
+    write(dir, 'a.ts', 'export const a = 1;\n');
+    await run(dir, true, withAi(server.baseUrl));
+    const prompt = server.requests[0].body.messages[1].content;
+    expect(prompt).toContain('+export const a = 1;');
+    expect(prompt).not.toContain('LOCKTOKEN123');
+    expect(prompt).not.toContain('MAPTOKEN456');
+  });
+
+  it('never sends excluded files to the model', async () => {
+    const { dir } = makeRepo();
+    const server = await mockAi(() => ({ content: 'chore: update notes' }));
+    write(dir, '.env', 'DB_PASSWORD_VALUE=ENVTOKEN789\n');
+    write(dir, 'notes.md', 'hello\n');
+    await run(dir, true, withAi(server.baseUrl));
+    expect(JSON.stringify(server.requests[0].body)).not.toContain('ENVTOKEN789');
   });
 });

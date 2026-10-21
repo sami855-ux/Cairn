@@ -14,6 +14,7 @@ describe('config', () => {
     expect(config.push.includePending).toBe(false);
     expect(config.commit.split).toBe('none');
     expect(config.commit.maxCommitsPerRun).toBe(20);
+    expect(config.commit.ai).toMatchObject({ enabled: false, baseUrl: 'http://localhost:11434/v1' });
   });
 
   it('fills repo defaults', () => {
@@ -26,12 +27,13 @@ describe('config', () => {
     expect(() => parseConfig({ schedule: { time: '25:00' } })).toThrow(/schedule.time/);
     expect(() => parseConfig({ repos: [{ remote: 'origin' }] })).toThrow(/repos.0.path/);
     expect(() => parseConfig({ commit: { split: 'folder' } })).toThrow(/commit.split/);
+    expect(() => parseConfig({ commit: { ai: { baseUrl: 'localhost' } } })).toThrow(/commit.ai.baseUrl/);
   });
 
   it('round trips through disk and reports missing or broken files', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-config-'));
     const file = path.join(dir, 'nested', 'config.json');
-    await expect(loadConfig(file)).rejects.toThrow(/cairn init/);
+    await expect(loadConfig(file)).rejects.toThrow(/git-contribute init/);
     const config = parseConfig({ repos: [{ path: '/tmp/x', push: false }] });
     await saveConfig(config, file);
     expect(await loadConfig(file)).toEqual(config);
