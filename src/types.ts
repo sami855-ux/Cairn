@@ -36,6 +36,8 @@ export interface PushOutcome {
 export interface CommitInfo {
   sha?: string;
   message: string;
+  source?: 'ai' | 'rules';
+  aiError?: string;
 }
 
 export interface RepoReport {
