@@ -2,7 +2,14 @@ import type { SimpleGit } from 'simple-git';
 import type { PushOutcome } from './types.js';
 import { errorText } from './util.js';
 
-export async function pushBranch(git: SimpleGit, remote: string, branch: string): Promise<PushOutcome> {
+export const NOTHING_TO_PUSH = 'nothing to push';
+
+export async function pushBranch(
+  git: SimpleGit,
+  remote: string,
+  branch: string,
+  onlyShas?: Set<string>,
+): Promise<PushOutcome> {
   try {
     const remotes = await git.getRemotes();
     if (!remotes.some((r) => r.name === remote)) {
@@ -26,7 +33,17 @@ export async function pushBranch(git: SimpleGit, remote: string, branch: string)
     if (behind > 0) {
       return { status: 'skipped', detail: `${remote}/${branch} has ${behind} new commit(s), pull before the next run` };
     }
-    if (ahead === 0) return { status: 'skipped', detail: 'nothing to push' };
+    if (ahead === 0) return { status: 'skipped', detail: NOTHING_TO_PUSH };
+    if (onlyShas) {
+      const unpushed = (await git.raw(['rev-list', 'FETCH_HEAD..HEAD'])).split('\n').filter(Boolean);
+      const foreign = unpushed.filter((sha) => !onlyShas.has(sha));
+      if (foreign.length > 0) {
+        return {
+          status: 'skipped',
+          detail: `${foreign.length} unpushed commit(s) were not made by cairn, enable push.includePending to publish them`,
+        };
+      }
+    }
 
     await git.raw(['push', remote, `refs/heads/${branch}:refs/heads/${branch}`]);
     const local = (await git.revparse(['HEAD'])).trim();

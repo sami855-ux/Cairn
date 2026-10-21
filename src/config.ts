@@ -34,6 +34,8 @@ export const DEFAULT_BLOCKED_PATHS = [
 
 export const DEFAULT_ALLOWED_PATHS = ['.env.example', '.env.sample', '.env.template'];
 
+export const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 const repoSchema = z
   .object({
     path: z.string().min(1),
@@ -41,6 +43,7 @@ const repoSchema = z
     branch: z.string().min(1).optional(),
     push: z.boolean().default(true),
     enabled: z.boolean().default(true),
+    time: z.string().regex(TIME_PATTERN, 'must look like 21:30').optional(),
   })
   .strict();
 
@@ -85,7 +88,7 @@ const configSchema = z
       .object({
         time: z
           .string()
-          .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'must look like 21:30')
+          .regex(TIME_PATTERN, 'must look like 21:30')
           .default('21:00'),
       })
       .strict()
@@ -120,7 +123,7 @@ export async function loadConfig(file: string = defaultConfigPath()): Promise<Co
     text = await fs.readFile(file, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new ConfigError(`no config at ${file}, run "git-contribute init" first`);
+      throw new ConfigError(`no config at ${file}, run "cairn init" first`);
     }
     throw error;
   }

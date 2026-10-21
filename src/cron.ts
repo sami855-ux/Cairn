@@ -6,7 +6,7 @@ const END = '# END cairn';
 const BLOCK = /# BEGIN cairn\n[\s\S]*?# END cairn\n?/g;
 
 export interface CronOptions {
-  time: string;
+  time?: string;
   node: string;
   script: string;
   apply: boolean;
@@ -19,14 +19,17 @@ function shellQuote(value: string): string {
 }
 
 export function buildCronLine(options: CronOptions): string {
-  const [hour, minute] = options.time.split(':').map(Number);
   const args = [shellQuote(options.node), shellQuote(options.script)];
   if (options.configFile) args.push('--config', shellQuote(options.configFile));
   args.push('run');
   if (options.apply) args.push('--apply');
+  args.push('--due');
   const searchPath = [path.dirname(options.node), '/usr/local/bin', '/usr/bin', '/bin'].join(':');
-  const command = `PATH=${shellQuote(searchPath)} ${args.join(' ')} >> ${shellQuote(options.logFile)} 2>&1`;
-  return `${minute} ${hour} * * * ${command.replace(/%/g, '\\%')}`;
+  const command = `PATH=${shellQuote(searchPath)} ${args.join(' ')} >> ${shellQuote(options.logFile)} 2>&1`.replace(
+    /%/g,
+    '\\%',
+  );
+  return [`*/15 * * * * ${command}`, `@reboot sleep 90 && ${command}`].join('\n');
 }
 
 export function stripCrontab(existing: string): string {
@@ -34,8 +37,9 @@ export function stripCrontab(existing: string): string {
   return stripped.trim() === '' ? '' : `${stripped.replace(/\n*$/, '')}\n`;
 }
 
-export function mergeCrontab(existing: string, line: string): string {
-  return `${stripCrontab(existing)}${BEGIN}\n${line}\n${END}\n`;
+export function mergeCrontab(existing: string, lines: string | string[]): string {
+  const body = (Array.isArray(lines) ? lines : [lines]).join('\n');
+  return `${stripCrontab(existing)}${BEGIN}\n${body}\n${END}\n`;
 }
 
 export function hasCronBlock(existing: string): boolean {
