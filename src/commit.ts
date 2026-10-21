@@ -2,7 +2,6 @@ import path from 'node:path';
 import type { SimpleGit } from 'simple-git';
 import type { FileChange } from './types.js';
 
-const GENERIC = /^(page|layout|index|route|loading|error|template|default|middleware)\.[a-z0-9]+$/i;
 const DOC = /\.(md|mdx|txt|rst)$/i;
 const TEST = /(^|\/)(tests?|__tests__)\/|\.(test|spec)\.[a-z]+$/i;
 const MAX_SUBJECT = 72;
@@ -12,6 +11,8 @@ export function inferType(changes: FileChange[]): string {
   if (changes.every((c) => TEST.test(c.path))) return 'test';
   return 'chore';
 }
+
+const GENERIC = /^(page|layout|index|route|loading|error|template|default|middleware)\.[a-z0-9]+$/i;
 
 function tail(file: string, depth: number): string {
   return file.split('/').slice(-depth).join('/');
@@ -59,12 +60,22 @@ export function splitChanges(
   return changes.slice(0, maxCommits).map((c) => [c]);
 }
 
-export async function commitChanges(git: SimpleGit, changes: FileChange[], message: string): Promise<string> {
+export type Compose = (diff: string) => Promise<string | null>;
+
+const DIFF_EXCLUDES = ['*.lock', '*package-lock.json', '*pnpm-lock.yaml', '*.min.js', '*.map'];
+
+export async function commitChanges(
+  git: SimpleGit,
+  changes: FileChange[],
+  message: string,
+  compose?: Compose,
+): Promise<{ sha: string; message: string }> {
   const toAdd = changes.filter((c) => c.needsAdd).map((c) => c.path);
   const allowed = new Set(
     changes.flatMap((c) => [c.path, c.from].filter((p): p is string => Boolean(p))),
   );
   const before = await git.revparse(['HEAD']).then((out) => out.trim(), () => null);
+  let finalMessage = message;
   try {
     if (toAdd.length > 0) await git.raw(['add', '-A', '--', ...toAdd]);
     const cached = (await git.raw(['diff', '--cached', '--name-only', '--no-renames', '-z']))
@@ -73,7 +84,13 @@ export async function commitChanges(git: SimpleGit, changes: FileChange[], messa
     const stray = cached.filter((p) => !allowed.has(p));
     if (stray.length > 0) throw new Error(`unexpected staged files: ${stray.join(', ')}`);
     if (cached.length === 0) throw new Error('nothing was staged');
-    await git.raw(['commit', '-m', message]);
+    if (compose) {
+      const diff = await git
+        .raw(['diff', '--cached', '--no-color', '--unified=2', '--', '.', ...DIFF_EXCLUDES.map((p) => `:(exclude)${p}`)])
+        .catch(() => '');
+      if (diff.trim()) finalMessage = (await compose(diff).catch(() => null)) ?? message;
+    }
+    await git.raw(['commit', '-m', finalMessage]);
     const after = await git.revparse(['HEAD']).then((out) => out.trim(), () => null);
     if (!after || after === before) {
       throw new Error('commit did not complete, a git hook may have rejected it');
@@ -82,5 +99,5 @@ export async function commitChanges(git: SimpleGit, changes: FileChange[], messa
     if (toAdd.length > 0) await git.raw(['reset', '-q', '--', ...toAdd]).catch(() => undefined);
     throw error;
   }
-  return (await git.revparse(['HEAD'])).trim();
+  return { sha: (await git.revparse(['HEAD'])).trim(), message: finalMessage };
 }
