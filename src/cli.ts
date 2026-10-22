@@ -69,6 +69,7 @@ function command<T extends unknown[]>(fn: (...args: T) => Promise<void>) {
 
 interface ExecuteOptions {
   apply: boolean;
+  due?: boolean;
   repo?: string;
   json?: boolean;
   showScanHint?: boolean;
@@ -82,7 +83,7 @@ async function execute(options: ExecuteOptions): Promise<void> {
   try {
     reports = await withLock(lockPath(), async () => {
       const started = performance.now();
-      const result = await runAll(config, { apply: options.apply, only: options.repo });
+      const result = await runAll(config, { apply: options.apply, only: options.repo, due: options.due });
       elapsedMs = performance.now() - started;
       return result;
     });
@@ -435,15 +436,16 @@ program
   .command('run')
   .description('scan, commit and push (dry run unless --apply is given or dryRun is false in the config)')
   .option('--apply', 'commit and push for real')
+  .option('--due', 'only run repos whose scheduled time has passed and have not run today')
   .option('--dry-run', 'report only')
   .option('--repo <path>', 'only this repository')
   .option('--json', 'print JSON')
   .action(
-    command(async (options: { apply?: boolean; dryRun?: boolean; repo?: string; json?: boolean }) => {
+    command(async (options: { apply?: boolean; due?: boolean; dryRun?: boolean; repo?: string; json?: boolean }) => {
       if (options.apply && options.dryRun) throw new Error('--apply and --dry-run cannot be combined');
       const config = await loadConfig(configFile());
       const apply = options.apply ? true : options.dryRun ? false : !config.dryRun;
-      await execute({ apply, repo: options.repo, json: options.json });
+      await execute({ apply, due: options.due, repo: options.repo, json: options.json });
     }),
   );
 
