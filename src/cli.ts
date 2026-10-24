@@ -12,6 +12,7 @@ import { cronLogPath, defaultConfigPath, lockPath, resolveRepoPath, stateDir } f
 import { runAll } from './runner.js';
 import { openGit } from './scanner.js';
 import { exists } from './util.js';
+import { checkAi } from './ai.js';
 
 process.env.GIT_TERMINAL_PROMPT = '0';
 
@@ -19,6 +20,7 @@ const require = createRequire(import.meta.url);
 const { version } = require('../package.json') as { version: string };
 
 const program = new Command();
+
 program
   .name('cairn')
   .description('Commit and push real, safe changes from your Git repositories on a daily schedule')
@@ -116,6 +118,24 @@ program
       }
       await saveConfig(defaultConfig(), file);
       console.log(formatSuccess(`created ${file}`, formatOptions()));
+    }),
+  );
+
+const aiCommand = program.command('ai').description('AI commit message tools');
+
+aiCommand
+  .command('check')
+  .description('test the AI provider with a sample diff')
+  .action(
+    command(async () => {
+      const config = await loadConfig(configFile());
+      const aiConfig = config.commit.ai;
+      const presentation = formatOptions();
+      console.log(formatLabel('Model', `${aiConfig.model} at ${aiConfig.baseUrl}`, presentation));
+      if (!aiConfig.enabled) throw new Error('AI is disabled, set commit.ai.enabled to true in your config');
+      const result = await checkAi(aiConfig);
+      if (!result.ok) throw new Error(`AI check failed: ${result.error}`);
+      console.log(formatSuccess(`AI check passed: ${result.message}`, presentation));
     }),
   );
 

@@ -50,10 +50,10 @@ const repoSchema = z
 const aiSchema = z
   .object({
     enabled: z.boolean().default(false),
-    baseUrl: z.string().url().default('http://localhost:11434/v1'),
-    model: z.string().min(1).default('qwen2.5-coder:3b'),
+    baseUrl: z.string().url().default('https://api.groq.com/openai/v1'),
+    model: z.string().min(1).default('openai/gpt-oss-20b'),
     apiKeyEnv: z.string().min(1).optional(),
-    apiKeyFile: z.string().min(1).optional(),
+    apiKeyFile: z.string().min(1).default('~/.config/cairn/ai.key'),
     maxDiffBytes: z.number().int().positive().default(12000),
     timeoutSeconds: z.number().int().positive().default(30),
   })

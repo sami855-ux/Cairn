@@ -62,7 +62,7 @@ export async function suggestMessage(ai: AiConfig, files: string[], diff: string
       body: JSON.stringify({
         model: ai.model,
         temperature: 0.2,
-        max_tokens: 200,
+        max_tokens: 1000,
         stream: false,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
