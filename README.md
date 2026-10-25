@@ -1,4 +1,4 @@
-# Cairn 🪨
+# Cairn
 
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x%20%7C%207.x-blue.svg)](https://www.typescriptlang.org/)
@@ -50,13 +50,13 @@ Dry run is the default across all commands. Nothing is committed or pushed unles
 
 ## Core Principles & Highlights
 
-- 🛡️ **Zero Secret Leakage**: Integrated entropy and pattern scanners detect private keys, cloud tokens (AWS, GitHub, Slack, Stripe, Google), JWTs, credentials in URLs, and hardcoded secrets before files are staged.
-- 🔒 **Safe By Default**: Runs non-destructive dry-run previews by default. Cairn will only write changes to disk or Git history when explicitly authorized.
-- 🚫 **No Destructive Operations**: Cairn never runs `git pull`, `git rebase`, or `git push --force`. If upstream commits exist that you don't have, Cairn cleanly skips pushing and reports the condition.
-- 🧩 **Flexible Commit Splitting**: Commit all safe changes together in one batch, or enable file-by-file splitting (`commit.split: "file"`) with configurable per-run caps to cleanly space out large changesets over days.
-- 🤖 **Conventional Commit Intelligence**: Automatically formats commits with `{type}: {summary}` syntax, or routes sanitized diffs to local (Ollama) or hosted (Groq, Google Gemini, OpenRouter) models.
-- ⏰ **Reliable Catch-Up Scheduler**: Cron triggers a lightweight check every 15 minutes and at reboot. If your machine was offline or asleep during the scheduled hour, Cairn commits and catches up as soon as it resumes.
-- 📊 **Rich Terminal & Machine-Readable Output**: Clean color-coded terminal reports, interactive spinners, tabular repository views, and structured `--json` output for headless pipelines.
+- **Zero Secret Leakage**: Integrated entropy and pattern scanners detect private keys, cloud tokens (AWS, GitHub, Slack, Stripe, Google), JWTs, credentials in URLs, and hardcoded secrets before files are staged.
+- **Safe By Default**: Runs non-destructive dry-run previews by default. Cairn will only write changes to disk or Git history when explicitly authorized.
+- **No Destructive Operations**: Cairn never runs `git pull`, `git rebase`, or `git push --force`. If upstream commits exist that you do not have locally, Cairn cleanly skips pushing and reports the condition.
+- **Flexible Commit Splitting**: Commit all safe changes together in one batch, or enable file-by-file splitting (`commit.split: "file"`) with configurable per-run caps to cleanly space out large changesets over days.
+- **Conventional Commit Intelligence**: Automatically formats commits with `{type}: {summary}` syntax, or routes sanitized diffs to local (Ollama) or hosted (Groq, Google Gemini, OpenRouter) models.
+- **Reliable Catch-Up Scheduler**: Cron triggers a lightweight check every 15 minutes and at reboot. If your machine was offline or asleep during the scheduled hour, Cairn commits and catches up as soon as it resumes.
+- **Rich Terminal & Machine-Readable Output**: Clean color-coded terminal reports, interactive spinners, tabular repository views, and structured `--json` output for headless pipelines.
 
 ---
 
@@ -67,36 +67,36 @@ Cairn executes a multi-stage validation and commit pipeline:
 ```mermaid
 flowchart TD
     A[Start: cairn run / cron] --> B[Acquire Process Lock run.lock]
-    B --> C[Load Config & State]
+    B --> C[Load Config and State]
     C --> D{Check Due Time?}
     D -- Not Due --> E[Skip Repository]
     D -- Due or Manual --> F[Scan Repository via simple-git]
-    
+
     F --> G{In-Progress Op? Detached HEAD? Conflicts?}
     G -- Yes --> H[Skip with Reason]
-    G -- Safe --> I[Audit Files for Blocked Paths, Sizes & Secrets]
-    
+    G -- Safe --> I[Audit Files for Blocked Paths, Sizes and Secrets]
+
     I --> J{Any Files Safe?}
     J -- No --> K[Skip Repo / Block Plan]
     J -- Yes --> L[Build Commit Plan: Single or Split]
-    
+
     L --> M{Is Dry Run?}
-    M -- Yes --> N[Output Dry-Run Report & Plan]
-    M -- No / --apply --> O[Stage Files Explicitly by Path]
-    
+    M -- Yes --> N[Output Dry-Run Report and Plan]
+    M -- Apply --> O[Stage Files Explicitly by Path]
+
     O --> P{Index Drift Check}
-    P -- Mismatch --> Q[Rollback Index Staging & Fail]
+    P -- Mismatch --> Q[Rollback Index Staging and Fail]
     P -- Valid --> R[Generate Message: AI or Rule Engine]
-    
+
     R --> S[Commit Changes]
     S --> T{Push Enabled?}
-    T -- No --> U[Persist State & Finish]
-    T -- Yes --> V[Fetch & Verify Ahead/Behind]
-    
+    T -- No --> U[Persist State and Finish]
+    T -- Yes --> V[Fetch and Verify Ahead/Behind]
+
     V --> W{Upstream Behind > 0?}
     W -- Yes --> X[Skip Push: Pull Required]
     W -- Safe --> Y[Push to Remote]
-    
+
     Y --> U
     U --> Z[Release Lock]
 ```
