@@ -22,6 +22,17 @@ function blankReport(path: string, branch: string | null, status: RepoReport['st
   return { path, branch, status, reason, files: 0, deferred: 0, excluded: [], commits: [] };
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function suggestWithRetry(ai: Config['commit']['ai'], files: string[], diff: string) {
+  let result = await suggestMessage(ai, files, diff);
+  for (let attempt = 1; attempt <= 2 && !('message' in result); attempt++) {
+    await sleep(3000 * attempt);
+    result = await suggestMessage(ai, files, diff);
+  }
+  return result;
+}
+
 async function inspect(
   repo: RepoConfig,
   config: Config,
@@ -86,23 +97,29 @@ async function inspect(
     return report;
   }
 
-  const ai = config.commit.ai;
-  let aiAvailable = ai.enabled;
+    const ai = config.commit.ai;
+  let aiFailures = 0;
   emit?.({ type: 'repo-start', repo: name, files: groups.length });
   for (const [index, group] of groups.entries()) {
     const state: { used: boolean; error?: string } = { used: false };
-    const compose = aiAvailable
-      ? async (diff: string): Promise<string | null> => {
-          const result = await suggestMessage(ai, group.map((c) => c.path), truncateDiff(diff, ai.maxDiffBytes));
-          if ('message' in result) {
-            state.used = true;
-            return result.message;
+    const compose =
+      ai.enabled && aiFailures < 3
+        ? async (diff: string): Promise<string | null> => {
+            const result = await suggestWithRetry(
+              ai,
+              group.map((c) => c.path),
+              truncateDiff(diff, ai.maxDiffBytes),
+            );
+            if ('message' in result) {
+              state.used = true;
+              aiFailures = 0;
+              return result.message;
+            }
+            state.error = result.error;
+            aiFailures++;
+            return null;
           }
-          state.error = result.error;
-          aiAvailable = false;
-          return null;
-        }
-      : undefined;
+        : undefined;
     try {
       const done = await commitChanges(git, group, messages[index], compose);
       run.pending.push(done.sha);

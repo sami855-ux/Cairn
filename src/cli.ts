@@ -166,32 +166,7 @@ aiCommand
     }),
   );
 
-program
-  .command('run')
-  .description('scan, commit and push (dry run unless --apply is given or dryRun is false in the config)')
-  .option('--apply', 'commit and push for real')
-  .option('--due', 'only run repos whose scheduled time has passed and have not run today')
-  .option('--dry-run', 'report only')
-  .option('--repo <path>', 'only this repository')
-  .option('--json', 'print JSON')
-  .option('--no-notify', 'skip the desktop notification')
-  .action(
-    command(
-      async (options: {
-        apply?: boolean;
-        due?: boolean;
-        dryRun?: boolean;
-        repo?: string;
-        json?: boolean;
-        notify: boolean;
-      }) => {
-        if (options.apply && options.dryRun) throw new Error('--apply and --dry-run cannot be combined');
-        const config = await loadConfig(configFile());
-        const apply = options.apply ? true : options.dryRun ? false : !config.dryRun;
-        await execute({ apply, due: options.due, repo: options.repo, json: options.json, notify: options.notify });
-      },
-    ),
-  );
+
 
 program
   .command('add <path>')
@@ -514,15 +489,26 @@ program
   .option('--dry-run', 'report only')
   .option('--repo <path>', 'only this repository')
   .option('--json', 'print JSON')
+  .option('--no-notify', 'skip the desktop notification')
   .action(
-    command(async (options: { apply?: boolean; due?: boolean; dryRun?: boolean; repo?: string; json?: boolean }) => {
-      if (options.apply && options.dryRun) throw new Error('--apply and --dry-run cannot be combined');
-      const config = await loadConfig(configFile());
-      const apply = options.apply ? true : options.dryRun ? false : !config.dryRun;
-      await execute({ apply, due: options.due, repo: options.repo, json: options.json });
-    }),
+    command(
+      async (options: {
+        apply?: boolean;
+        due?: boolean;
+        dryRun?: boolean;
+        repo?: string;
+        json?: boolean;
+        notify: boolean;
+      }) => {
+        if (options.apply && options.dryRun) throw new Error('--apply and --dry-run cannot be combined');
+        const config = await loadConfig(configFile());
+        const apply = options.apply ? true : options.dryRun ? false : !config.dryRun;
+        await execute({ apply, due: options.due, repo: options.repo, json: options.json, notify: options.notify });
+      },
+    ),
   );
 
+  
 program
   .command('install')
   .description('add the daily cron job')
