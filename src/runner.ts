@@ -1,8 +1,10 @@
+import path from 'node:path';
 import { suggestMessage, truncateDiff } from './ai.js';
 import type { Config, RepoConfig } from './config.js';
 import { buildCommitMessage, commitChanges, splitChanges } from './commit.js';
 import { isDue, localDate } from './due.js';
 import { resolveRepoPath } from './paths.js';
+import type { ProgressEvent } from './progress.js';
 import { NOTHING_TO_PUSH, pushBranch } from './push.js';
 import { buildPlan } from './safety.js';
 import { openGit, scanRepo } from './scanner.js';
@@ -14,17 +16,28 @@ export interface RepoRun {
   pending: string[];
 }
 
+type Emit = (event: ProgressEvent) => void;
+
 function blankReport(path: string, branch: string | null, status: RepoReport['status'], reason?: string): RepoReport {
   return { path, branch, status, reason, files: 0, deferred: 0, excluded: [], commits: [] };
 }
 
-async function inspect(repo: RepoConfig, config: Config, apply: boolean, run: RepoRun): Promise<RepoReport> {
+async function inspect(
+  repo: RepoConfig,
+  config: Config,
+  apply: boolean,
+  run: RepoRun,
+  emit?: Emit,
+): Promise<RepoReport> {
   const scan = await scanRepo(repo, config);
   const report = blankReport(scan.root, scan.branch, 'skipped');
   if (scan.skipReason) return { ...report, reason: scan.skipReason };
 
+  const name = path.basename(scan.root);
   const branch = scan.branch as string;
-  const git = openGit(scan.root, config.push.timeoutSeconds);
+  const git = openGit(scan.root, config.push.timeoutSeconds, (stage, percent) =>
+    emit?.({ type: 'push', repo: name, stage, percent }),
+  );
   const plan = await buildPlan(scan.root, scan.changes, config);
   report.excluded = plan.excluded;
 
@@ -32,6 +45,8 @@ async function inspect(repo: RepoConfig, config: Config, apply: boolean, run: Re
     const only = config.push.includePending ? undefined : new Set(run.pending);
     const outcome = await pushBranch(git, repo.remote, branch, only);
     if (outcome.status === 'pushed' || outcome.detail === NOTHING_TO_PUSH) run.pending.length = 0;
+    if (outcome.status === 'pushed') emit?.({ type: 'pushed', repo: name, remote: repo.remote });
+    if (outcome.status === 'failed') emit?.({ type: 'failed', repo: name, message: outcome.detail ?? 'push failed' });
     return outcome;
   };
 
@@ -40,7 +55,10 @@ async function inspect(repo: RepoConfig, config: Config, apply: boolean, run: Re
   if (plan.state === 'clean') {
     report.status = 'clean';
     const hasPending = config.push.includePending ? scan.ahead > 0 : run.pending.length > 0;
-    if (apply && repo.push && scan.behind === 0 && hasPending) report.push = await publish();
+    if (apply && repo.push && scan.behind === 0 && hasPending) {
+      emit?.({ type: 'repo-start', repo: name, files: 0 });
+      report.push = await publish();
+    }
     return report;
   }
 
@@ -70,6 +88,7 @@ async function inspect(repo: RepoConfig, config: Config, apply: boolean, run: Re
 
   const ai = config.commit.ai;
   let aiAvailable = ai.enabled;
+  emit?.({ type: 'repo-start', repo: name, files: groups.length });
   for (const [index, group] of groups.entries()) {
     const state: { used: boolean; error?: string } = { used: false };
     const compose = aiAvailable
@@ -93,10 +112,18 @@ async function inspect(repo: RepoConfig, config: Config, apply: boolean, run: Re
         source: state.used ? 'ai' : 'rules',
         ...(state.error ? { aiError: state.error } : {}),
       });
+      emit?.({
+        type: 'commit',
+        repo: name,
+        file: group.length === 1 ? group[0].path : `${group.length} files`,
+        done: index + 1,
+        files: groups.length,
+      });
     } catch (error) {
       const detail = errorText(error);
       const reason =
         report.commits.length > 0 ? `committed ${report.commits.length} of ${groups.length}, then: ${detail}` : detail;
+      emit?.({ type: 'failed', repo: name, message: reason });
       return { ...report, status: 'failed', reason };
     }
   }
@@ -116,12 +143,14 @@ export async function processRepo(
   config: Config,
   apply: boolean,
   run: RepoRun = { pending: [] },
+  emit?: Emit,
 ): Promise<RepoReport> {
   const repoPath = resolveRepoPath(repo.path);
   if (!repo.enabled) return blankReport(repoPath, null, 'skipped', 'disabled');
   try {
-    return await inspect(repo, config, apply, run);
+    return await inspect(repo, config, apply, run, emit);
   } catch (error) {
+    emit?.({ type: 'failed', repo: path.basename(repoPath), message: errorText(error) });
     return blankReport(repoPath, null, 'failed', errorText(error));
   }
 }
@@ -134,6 +163,7 @@ export interface RunOptions {
   due?: boolean;
   now?: Date;
   stateFile?: string;
+  onProgress?: Emit;
 }
 
 export async function runAll(config: Config, options: RunOptions): Promise<RepoReport[]> {
@@ -148,7 +178,7 @@ export async function runAll(config: Config, options: RunOptions): Promise<RepoR
     const id = resolveRepoPath(repo.path);
     if (options.due && !isDue(repo, config, state[id], now, key)) continue;
     const entry = state[id] ?? { pending: [] };
-    const report = await processRepo(repo, config, options.apply, entry);
+    const report = await processRepo(repo, config, options.apply, entry, options.onProgress);
     if (options.due && finished(report)) entry[key] = localDate(now);
     state[id] = entry;
     if (options.apply || options.due) await saveState(state, options.stateFile);

@@ -15,11 +15,17 @@ const IN_PROGRESS: ReadonlyArray<readonly [string, string]> = [
   ['BISECT_LOG', 'bisect'],
 ];
 
-export function openGit(dir: string, timeoutSeconds = 60): SimpleGit {
+export function openGit(
+  dir: string,
+  timeoutSeconds?: number,
+  onProgress?: (stage: string, percent: number) => void,
+): SimpleGit {
   return simpleGit({
     baseDir: dir,
-    timeout: { block: timeoutSeconds * 1000 },
-    maxConcurrentProcesses: 1,
+    timeout: timeoutSeconds ? { block: timeoutSeconds * 1000 } : undefined,
+    progress: ({ method, stage, progress }) => {
+      if (method === 'push') onProgress?.(stage, progress);
+    },
   });
 }
 

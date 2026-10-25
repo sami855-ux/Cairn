@@ -13,6 +13,9 @@ import { runAll } from './runner.js';
 import { openGit } from './scanner.js';
 import { exists } from './util.js';
 import { checkAi } from './ai.js';
+import { createProgress } from './progress.js';
+import { notify } from './notify.js';
+import type { RepoReport } from './types.js';
 
 process.env.GIT_TERMINAL_PROMPT = '0';
 
@@ -38,25 +41,25 @@ const colorEnabled = (): boolean => {
 
 const formatOptions = () => ({ color: colorEnabled() });
 
-function startLoader(): () => void {
-  const colors = createColors(colorEnabled());
-  const frames = ['●··', '·●·', '··●', '·●·'];
-  let frame = 0;
-  let active = true;
-  const render = () => {
-    process.stdout.write(`\r\x1B[2K  ${colors.cyan(frames[frame])}  ${colors.dim('applying changes')}`);
-    frame = (frame + 1) % frames.length;
-  };
-  process.stdout.write('\x1B[?25l');
-  render();
-  const timer = setInterval(render, 140);
-  return () => {
-    if (!active) return;
-    active = false;
-    clearInterval(timer);
-    process.stdout.write('\r\x1B[2K\x1B[?25h');
-  };
-}
+// function startLoader(): () => void {
+//   const colors = createColors(colorEnabled());
+//   const frames = ['●··', '·●·', '··●', '·●·'];
+//   let frame = 0;
+//   let active = true;
+//   const render = () => {
+//     process.stdout.write(`\r\x1B[2K  ${colors.cyan(frames[frame])}  ${colors.dim('applying changes')}`);
+//     frame = (frame + 1) % frames.length;
+//   };
+//   process.stdout.write('\x1B[?25l');
+//   render();
+//   const timer = setInterval(render, 140);
+//   return () => {
+//     if (!active) return;
+//     active = false;
+//     clearInterval(timer);
+//     process.stdout.write('\r\x1B[2K\x1B[?25h');
+//   };
+// }
 
 function command<T extends unknown[]>(fn: (...args: T) => Promise<void>) {
   return async (...args: T): Promise<void> => {
@@ -74,24 +77,48 @@ interface ExecuteOptions {
   due?: boolean;
   repo?: string;
   json?: boolean;
+  notify?: boolean;
   showScanHint?: boolean;
 }
+
+const announce = (reports: RepoReport[]): void => {
+  const commits = reports.reduce((total, r) => total + r.commits.length, 0);
+  const pushed = reports.filter((r) => r.push?.status === 'pushed').length;
+  const failed = reports.filter((r) => r.status === 'failed' || r.push?.status === 'failed');
+  if (failed.length > 0) {
+    const first = failed[0];
+    const reason = first.reason ?? first.push?.detail ?? 'unknown error';
+    notify('cairn: run failed', `${path.basename(first.path)}: ${reason}`, 'critical');
+    return;
+  }
+  if (commits === 0 && pushed === 0) return;
+  notify('cairn', `${commits} commit${commits === 1 ? '' : 's'} made, ${pushed} repo${pushed === 1 ? '' : 's'} pushed`);
+};
 
 async function execute(options: ExecuteOptions): Promise<void> {
   const config = await loadConfig(configFile());
   let elapsedMs = 0;
-  const stopLoader = options.apply && !options.json && process.stdout.isTTY ? startLoader() : undefined;
+  const reporting = options.apply && !options.json;
+  const progress = reporting
+    ? createProgress({ color: colorEnabled(), live: Boolean(process.stdout.isTTY) })
+    : undefined;
   let reports;
   try {
     reports = await withLock(lockPath(), async () => {
       const started = performance.now();
-      const result = await runAll(config, { apply: options.apply, only: options.repo, due: options.due });
+      const result = await runAll(config, {
+        apply: options.apply,
+        only: options.repo,
+        due: options.due,
+        onProgress: progress?.handle,
+      });
       elapsedMs = performance.now() - started;
       return result;
     });
   } finally {
-    stopLoader?.();
+    progress?.stop();
   }
+  if (options.apply && options.notify !== false && !options.json) announce(reports);
   if (options.json) {
     console.log(JSON.stringify({ apply: options.apply, reports }, null, 2));
   } else {
@@ -137,6 +164,33 @@ aiCommand
       if (!result.ok) throw new Error(`AI check failed: ${result.error}`);
       console.log(formatSuccess(`AI check passed: ${result.message}`, presentation));
     }),
+  );
+
+program
+  .command('run')
+  .description('scan, commit and push (dry run unless --apply is given or dryRun is false in the config)')
+  .option('--apply', 'commit and push for real')
+  .option('--due', 'only run repos whose scheduled time has passed and have not run today')
+  .option('--dry-run', 'report only')
+  .option('--repo <path>', 'only this repository')
+  .option('--json', 'print JSON')
+  .option('--no-notify', 'skip the desktop notification')
+  .action(
+    command(
+      async (options: {
+        apply?: boolean;
+        due?: boolean;
+        dryRun?: boolean;
+        repo?: string;
+        json?: boolean;
+        notify: boolean;
+      }) => {
+        if (options.apply && options.dryRun) throw new Error('--apply and --dry-run cannot be combined');
+        const config = await loadConfig(configFile());
+        const apply = options.apply ? true : options.dryRun ? false : !config.dryRun;
+        await execute({ apply, due: options.due, repo: options.repo, json: options.json, notify: options.notify });
+      },
+    ),
   );
 
 program
