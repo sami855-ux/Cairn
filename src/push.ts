@@ -4,6 +4,17 @@ import { errorText } from './util.js';
 
 export const NOTHING_TO_PUSH = 'nothing to push';
 
+/** Return the fetch URL of a remote, or null if the remote doesn't exist. */
+export async function getRemoteUrl(git: SimpleGit, remote: string): Promise<string | null> {
+  try {
+    const remotes = await git.getRemotes(true);
+    const found = remotes.find((r) => r.name === remote);
+    return found?.refs?.fetch ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function pushBranch(
   git: SimpleGit,
   remote: string,

@@ -29,7 +29,7 @@ export interface Plan {
 }
 
 export interface PushOutcome {
-  status: 'pushed' | 'skipped' | 'failed' | 'planned';
+  status: 'pushed' | 'skipped' | 'failed' | 'planned' | 'deferred';
   detail: string;
 }
 

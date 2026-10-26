@@ -84,15 +84,67 @@ interface ExecuteOptions {
 const announce = (reports: RepoReport[]): void => {
   const commits = reports.reduce((total, r) => total + r.commits.length, 0);
   const pushed = reports.filter((r) => r.push?.status === 'pushed').length;
+  const deferred = reports.filter((r) => r.push?.status === 'deferred').length;
   const failed = reports.filter((r) => r.status === 'failed' || r.push?.status === 'failed');
+
   if (failed.length > 0) {
     const first = failed[0];
+    const repoName = path.basename(first.path);
     const reason = first.reason ?? first.push?.detail ?? 'unknown error';
-    notify('cairn: run failed', `${path.basename(first.path)}: ${reason}`, 'critical');
+    const extra = failed.length > 1 ? ` (+${failed.length - 1} more)` : '';
+    notify(
+      `⚠ cairn — ${repoName} failed${extra}`,
+      reason,
+      'critical',
+      'dialog-error',
+    );
     return;
   }
-  if (commits === 0 && pushed === 0) return;
-  notify('cairn', `${commits} commit${commits === 1 ? '' : 's'} made, ${pushed} repo${pushed === 1 ? '' : 's'} pushed`);
+
+  if (commits === 0 && pushed === 0 && deferred === 0) return;
+
+  if (commits > 0 && pushed > 0) {
+    const repoWord = pushed === 1 ? 'repo' : 'repos';
+    notify(
+      `✓ cairn — ${commits} commit${commits === 1 ? '' : 's'} saved & pushed`,
+      `${pushed} ${repoWord} synced to remote`,
+      'normal',
+      'vcs-commit',
+    );
+  } else if (commits > 0 && deferred > 0) {
+    const repoWord = deferred === 1 ? 'repo' : 'repos';
+    notify(
+      `✓ cairn — ${commits} commit${commits === 1 ? '' : 's'} saved (offline)`,
+      `Push deferred for ${deferred} ${repoWord} — will sync automatically when back online`,
+      'normal',
+      'network-offline',
+    );
+  } else if (commits > 0) {
+    const repoCount = reports.filter((r) => r.commits.length > 0).length;
+    const repoWord = repoCount === 1 ? 'repo' : 'repos';
+    notify(
+      `✓ cairn — ${commits} commit${commits === 1 ? '' : 's'} saved`,
+      `Changes committed across ${repoCount} ${repoWord} (not yet pushed)`,
+      'normal',
+      'vcs-locally-modified',
+    );
+  } else if (deferred > 0) {
+    const repoWord = deferred === 1 ? 'repo' : 'repos';
+    notify(
+      `↻ cairn — push deferred (offline)`,
+      `${deferred} ${repoWord} will sync to remote when back online`,
+      'normal',
+      'network-offline',
+    );
+  } else {
+    const repoWord = pushed === 1 ? 'repo' : 'repos';
+    notify(
+      `✓ cairn — ${pushed} ${repoWord} pushed`,
+      `Pending commits synced to remote`,
+      'normal',
+      'vcs-push',
+    );
+  }
 };
 
 async function execute(options: ExecuteOptions): Promise<void> {

@@ -3,9 +3,10 @@ import { suggestMessage, truncateDiff } from './ai.js';
 import type { Config, RepoConfig } from './config.js';
 import { buildCommitMessage, commitChanges, splitChanges } from './commit.js';
 import { isDue, localDate } from './due.js';
+import { isRemoteReachable } from './net.js';
 import { resolveRepoPath } from './paths.js';
 import type { ProgressEvent } from './progress.js';
-import { NOTHING_TO_PUSH, pushBranch } from './push.js';
+import { getRemoteUrl, NOTHING_TO_PUSH, pushBranch } from './push.js';
 import { buildPlan } from './safety.js';
 import { openGit, scanRepo } from './scanner.js';
 import { loadState, saveState } from './state.js';
@@ -54,6 +55,15 @@ async function inspect(
 
   const publish = async (): Promise<PushOutcome> => {
     const only = config.push.includePending ? undefined : new Set(run.pending);
+
+    // Probe the remote host before attempting to push.
+    const remoteUrl = await getRemoteUrl(git, repo.remote);
+    const online = remoteUrl ? await isRemoteReachable(remoteUrl) : true;
+    if (!online) {
+      emit?.({ type: 'failed', repo: name, message: 'offline — push deferred to next run' });
+      return { status: 'deferred', detail: `${repo.remote} is unreachable — pending commits will be pushed when back online` };
+    }
+
     const outcome = await pushBranch(git, repo.remote, branch, only);
     if (outcome.status === 'pushed' || outcome.detail === NOTHING_TO_PUSH) run.pending.length = 0;
     if (outcome.status === 'pushed') emit?.({ type: 'pushed', repo: name, remote: repo.remote });
@@ -97,8 +107,9 @@ async function inspect(
     return report;
   }
 
-    const ai = config.commit.ai;
+  const ai = config.commit.ai;
   let aiFailures = 0;
+  
   emit?.({ type: 'repo-start', repo: name, files: groups.length });
   for (const [index, group] of groups.entries()) {
     const state: { used: boolean; error?: string } = { used: false };
