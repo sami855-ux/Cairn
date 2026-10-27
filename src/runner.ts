@@ -1,4 +1,5 @@
 import path from 'node:path';
+import type { SimpleGit } from 'simple-git';
 import { suggestMessage, truncateDiff } from './ai.js';
 import type { Config, RepoConfig } from './config.js';
 import { buildCommitMessage, commitChanges, splitChanges } from './commit.js';
@@ -23,7 +24,8 @@ function blankReport(path: string, branch: string | null, status: RepoReport['st
   return { path, branch, status, reason, files: 0, deferred: 0, excluded: [], commits: [] };
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, process.env.VITEST ? 10 : ms));
 
 async function suggestWithRetry(ai: Config['commit']['ai'], files: string[], diff: string) {
   let result = await suggestMessage(ai, files, diff);
@@ -32,6 +34,19 @@ async function suggestWithRetry(ai: Config['commit']['ai'], files: string[], dif
     result = await suggestMessage(ai, files, diff);
   }
   return result;
+}
+
+async function reconcilePending(git: SimpleGit, remote: string, branch: string, pending: string[]): Promise<void> {
+  let unpushed: Set<string>;
+  try {
+    const out = await git.raw(['rev-list', `${remote}/${branch}..HEAD`]);
+    unpushed = new Set(out.split('\n').filter(Boolean));
+  } catch {
+    return;
+  }
+  const kept = pending.filter((sha) => unpushed.has(sha));
+  pending.length = 0;
+  pending.push(...kept);
 }
 
 async function inspect(
@@ -53,15 +68,16 @@ async function inspect(
   const plan = await buildPlan(scan.root, scan.changes, config);
   report.excluded = plan.excluded;
 
+  await reconcilePending(git, repo.remote, branch, run.pending);
+
   const publish = async (): Promise<PushOutcome> => {
     const only = config.push.includePending ? undefined : new Set(run.pending);
 
-    // Probe the remote host before attempting to push.
     const remoteUrl = await getRemoteUrl(git, repo.remote);
     const online = remoteUrl ? await isRemoteReachable(remoteUrl) : true;
     if (!online) {
-      emit?.({ type: 'failed', repo: name, message: 'offline — push deferred to next run' });
-      return { status: 'deferred', detail: `${repo.remote} is unreachable — pending commits will be pushed when back online` };
+      emit?.({ type: 'failed', repo: name, message: 'offline, push deferred to next run' });
+      return { status: 'deferred', detail: `${repo.remote} is unreachable, pending commits will be pushed when back online` };
     }
 
     const outcome = await pushBranch(git, repo.remote, branch, only);
@@ -73,17 +89,19 @@ async function inspect(
 
   if (plan.state === 'blocked') return { ...report, reason: plan.reason };
 
+  const carried = config.push.includePending ? scan.ahead : run.pending.length;
+
   if (plan.state === 'clean') {
     report.status = 'clean';
-    const hasPending = config.push.includePending ? scan.ahead > 0 : run.pending.length > 0;
-    if (apply && repo.push && scan.behind === 0 && hasPending) {
+    if (apply && repo.push && scan.behind === 0 && carried > 0) {
       emit?.({ type: 'repo-start', repo: name, files: 0 });
       report.push = await publish();
     }
     return report;
   }
 
-  const groups = splitChanges(plan.safe, config.commit.split, config.commit.maxCommitsPerRun);
+  const budget = Math.max(0, config.commit.maxCommitsPerRun - carried);
+  const groups = splitChanges(plan.safe, config.commit.split, budget);
   report.files = groups.reduce((total, group) => total + group.length, 0);
   report.deferred = plan.safe.length - report.files;
   const messages = groups.map((group) => buildCommitMessage(group, config.commit.messageTemplate));
@@ -107,27 +125,36 @@ async function inspect(
     return report;
   }
 
+  if (groups.length === 0) {
+    report.status = 'skipped';
+    report.reason = `commit limit reached by ${carried} pending commit(s)`;
+    if (repo.push && scan.behind === 0 && carried > 0) {
+      emit?.({ type: 'repo-start', repo: name, files: 0 });
+      report.push = await publish();
+    }
+    return report;
+  }
+
   const ai = config.commit.ai;
-  let aiFailures = 0;
-  
+  let aiAvailable = ai.enabled;
+
   emit?.({ type: 'repo-start', repo: name, files: groups.length });
   for (const [index, group] of groups.entries()) {
     const state: { used: boolean; error?: string } = { used: false };
     const compose =
-      ai.enabled && aiFailures < 3
+      aiAvailable
         ? async (diff: string): Promise<string | null> => {
-            const result = await suggestWithRetry(
+            const result = await suggestMessage(
               ai,
               group.map((c) => c.path),
               truncateDiff(diff, ai.maxDiffBytes),
             );
             if ('message' in result) {
               state.used = true;
-              aiFailures = 0;
               return result.message;
             }
             state.error = result.error;
-            aiFailures++;
+            aiAvailable = false;
             return null;
           }
         : undefined;
@@ -183,7 +210,10 @@ export async function processRepo(
   }
 }
 
-const finished = (report: RepoReport): boolean => report.status !== 'failed' && report.push?.status !== 'failed';
+const OPEN_PUSH_STATES: string[] = ['failed', 'deferred', 'blocked'];
+
+const finished = (report: RepoReport): boolean =>
+  report.status !== 'failed' && !OPEN_PUSH_STATES.includes(report.push?.status ?? '');
 
 export interface RunOptions {
   apply: boolean;

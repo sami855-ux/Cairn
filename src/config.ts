@@ -81,6 +81,7 @@ const configSchema = z
       .object({
         includePending: z.boolean().default(false),
         timeoutSeconds: z.number().int().positive().default(60),
+        autoPull: z.boolean().default(false),
       })
       .strict()
       .default({}),

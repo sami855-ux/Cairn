@@ -159,8 +159,8 @@ describe('processRepo', () => {
     write(dir, 'mine.ts', '1\n');
     const report = await run(dir, true);
     expect(report.status).toBe('committed');
-    expect(report.push?.status).toBe('skipped');
-    expect(report.push?.detail).toMatch(/new commit/);
+    expect(report.push?.status).toBe('blocked');
+    expect(report.push?.detail).toMatch(/ahead of local branch|commit\(s\) ahead/);
     expect(git(remote, 'rev-parse', 'main')).toBe(remoteHead);
   });
 
@@ -533,8 +533,8 @@ describe('offline pushes and pending commits', () => {
     git(dir, 'remote', 'set-url', 'origin', remote);
     const cfg = config(dir);
     const report = await processRepo(cfg.repos[0], cfg, true, run);
-    expect(report.push?.status).toBe('skipped');
-    expect(report.push?.detail).toMatch(/new commit/);
+    expect(report.push?.status).toBe('blocked');
+    expect(report.push?.detail).toMatch(/ahead of local branch|commit\(s\) ahead/);
     expect(run.pending).toHaveLength(1);
   });
 });

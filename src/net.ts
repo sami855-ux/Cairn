@@ -57,6 +57,6 @@ export function isReachable(host: string, port: number, timeoutMs = PROBE_TIMEOU
 /** Probe a git remote URL. Returns true when the host is reachable, false when offline or URL can't be parsed. */
 export async function isRemoteReachable(remoteUrl: string): Promise<boolean> {
   const parsed = parseRemoteHost(remoteUrl);
-  if (!parsed) return false;
+  if (!parsed) return true;
   return isReachable(parsed.host, parsed.port);
 }

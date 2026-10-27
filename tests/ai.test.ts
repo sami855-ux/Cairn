@@ -1,17 +1,28 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkAi, cleanMessage, suggestMessage, truncateDiff } from '../src/ai.js';
 import { defaultConfig } from '../src/config.js';
 import { startMockAi } from './helpers.js';
 
-const base = defaultConfig().commit.ai;
+const base = { ...defaultConfig().commit.ai, apiKeyFile: undefined };
 const servers: { close: () => Promise<void> }[] = [];
+
+const savedGroqKey = process.env.GROQ_API_KEY;
+
+beforeEach(() => {
+  delete process.env.GROQ_API_KEY;
+});
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => s.close()));
   delete process.env.GC_TEST_KEY;
+  if (savedGroqKey !== undefined) {
+    process.env.GROQ_API_KEY = savedGroqKey;
+  } else {
+    delete process.env.GROQ_API_KEY;
+  }
 });
 
 async function mock(content: string, extra: { status?: number; delayMs?: number } = {}) {

@@ -61,6 +61,8 @@ export function formatReport(report: RepoReport, options: FormatOptions): string
     if (report.push.status === 'planned') lines.push(`  ${colors.cyan(`➜  ${detail}`)}`);
     if (report.push.status === 'skipped') lines.push(`  ${colors.yellow(`⚠  push skipped: ${detail}`)}`);
     if (report.push.status === 'failed') lines.push(`  ${colors.red(`✗  push failed: ${detail}`)}`);
+    if (report.push.status === 'blocked') lines.push(`  ${colors.red(`✗  push blocked: ${detail}`)}`);
+    if (report.push.status === 'deferred') lines.push(`  ${colors.yellow(`↻  push deferred: ${detail}`)}`);
   }
   for (const item of report.excluded) {
     lines.push(`  ${colors.yellow('⚠')}  excluded  ${colors.bold(item.path)}  ${colors.dim(item.reason)}`);

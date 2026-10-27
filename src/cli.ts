@@ -4,11 +4,14 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { Command } from 'commander';
 import { createColors } from 'picocolors';
-import { defaultConfig, loadConfig, saveConfig } from './config.js';
+import { type Config, defaultConfig, loadConfig, saveConfig } from './config.js';
 import { buildCronLine, hasCronBlock, mergeCrontab, readCrontab, stripCrontab, writeCrontab } from './cron.js';
 import { formatError, formatHeader, formatLabel, formatReport, formatSuccess, formatSummary } from './format.js';
-import { isLocked, withLock } from './lock.js';
+import { acquireLock, isLocked, LockHeldError, withLock } from './lock.js';
 import { cronLogPath, defaultConfigPath, lockPath, resolveRepoPath, stateDir } from './paths.js';
+import { NOTHING_TO_PUSH } from './push.js';
+import { recordPush, type PushRecord } from './history.js';
+import { registerHistory } from './history-command.js';
 import { runAll } from './runner.js';
 import { openGit } from './scanner.js';
 import { exists } from './util.js';
@@ -147,6 +150,40 @@ const announce = (reports: RepoReport[]): void => {
   }
 };
 
+async function logPushes(config: Config, reports: RepoReport[]): Promise<void> {
+  for (const report of reports) {
+    if (!report.push) continue;
+    const { status, detail } = report.push;
+    if (status !== 'pushed' && status !== 'failed' && status !== 'deferred') continue;
+    if (detail === NOTHING_TO_PUSH) continue;
+
+    const resolved = resolveRepoPath(report.path);
+    const matched = config.repos.find((r) => resolveRepoPath(r.path) === resolved);
+    const remote = matched?.remote ?? 'origin';
+    const branch = matched?.branch ?? '-';
+
+    let commits = 0;
+    if (status === 'pushed') {
+      const match = /^(\d+)/.exec(detail);
+      commits = match ? parseInt(match[1], 10) : report.commits.length;
+    }
+
+    const record: PushRecord = {
+      at: new Date().toISOString(),
+      repo: resolved,
+      remote,
+      branch,
+      status,
+      commits,
+      detail,
+    };
+
+    try {
+      await recordPush(record);
+    } catch {}
+  }
+}
+
 async function execute(options: ExecuteOptions): Promise<void> {
   const config = await loadConfig(configFile());
   let elapsedMs = 0;
@@ -156,19 +193,19 @@ async function execute(options: ExecuteOptions): Promise<void> {
     : undefined;
   let reports;
   try {
-    reports = await withLock(lockPath(), async () => {
-      const started = performance.now();
-      const result = await runAll(config, {
-        apply: options.apply,
-        only: options.repo,
-        due: options.due,
-        onProgress: progress?.handle,
-      });
-      elapsedMs = performance.now() - started;
-      return result;
+    const started = performance.now();
+    reports = await runAll(config, {
+      apply: options.apply,
+      only: options.repo,
+      due: options.due,
+      onProgress: progress?.handle,
     });
+    elapsedMs = performance.now() - started;
   } finally {
     progress?.stop();
+  }
+  if (options.apply) {
+    await logPushes(config, reports);
   }
   if (options.apply && options.notify !== false && !options.json) announce(reports);
   if (options.json) {
@@ -555,7 +592,41 @@ program
         if (options.apply && options.dryRun) throw new Error('--apply and --dry-run cannot be combined');
         const config = await loadConfig(configFile());
         const apply = options.apply ? true : options.dryRun ? false : !config.dryRun;
-        await execute({ apply, due: options.due, repo: options.repo, json: options.json, notify: options.notify });
+
+        let release: (() => Promise<void>) | undefined;
+        let cleaningUp = false;
+        const onSignal = async () => {
+          if (cleaningUp) return;
+          cleaningUp = true;
+          try {
+            if (release) await release();
+          } finally {
+            process.exit(130);
+          }
+        };
+
+        try {
+          try {
+            release = await acquireLock();
+          } catch (error) {
+            if (error instanceof LockHeldError) {
+              console.log(error.message);
+              return;
+            }
+            throw error;
+          }
+
+          process.on('SIGINT', onSignal);
+          process.on('SIGTERM', onSignal);
+
+          await execute({ apply, due: options.due, repo: options.repo, json: options.json, notify: options.notify });
+        } finally {
+          process.off('SIGINT', onSignal);
+          process.off('SIGTERM', onSignal);
+          if (release) {
+            await release();
+          }
+        }
       },
     ),
   );
@@ -626,5 +697,7 @@ program
       console.log(formatLabel('Cron log', cronLogPath(), presentation));
     }),
   );
+
+registerHistory(program);
 
 await program.parseAsync(process.argv);

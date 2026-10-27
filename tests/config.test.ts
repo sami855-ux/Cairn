@@ -12,9 +12,10 @@ describe('config', () => {
     expect(config.schedule.time).toBe('21:00');
     expect(config.commit.blockedPaths).toContain('.env');
     expect(config.push.includePending).toBe(false);
+    expect(config.push.autoPull).toBe(false);
     expect(config.commit.split).toBe('none');
     expect(config.commit.maxCommitsPerRun).toBe(20);
-    expect(config.commit.ai).toMatchObject({ enabled: false, baseUrl: 'http://localhost:11434/v1' });
+    expect(config.commit.ai).toMatchObject({ enabled: false, baseUrl: 'https://api.groq.com/openai/v1' });
   });
 
   it('fills repo defaults', () => {

@@ -56,6 +56,7 @@ export function splitChanges(
   mode: 'none' | 'file',
   maxCommits: number,
 ): FileChange[][] {
+  if (maxCommits <= 0 || changes.length === 0) return [];
   if (mode === 'none' || changes.length < 2 || changes.some((c) => c.staged)) return [changes];
   return changes.slice(0, maxCommits).map((c) => [c]);
 }

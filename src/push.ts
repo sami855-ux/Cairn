@@ -4,7 +4,6 @@ import { errorText } from './util.js';
 
 export const NOTHING_TO_PUSH = 'nothing to push';
 
-/** Return the fetch URL of a remote, or null if the remote doesn't exist. */
 export async function getRemoteUrl(git: SimpleGit, remote: string): Promise<string | null> {
   try {
     const remotes = await git.getRemotes(true);
@@ -15,11 +14,29 @@ export async function getRemoteUrl(git: SimpleGit, remote: string): Promise<stri
   }
 }
 
+async function parseAheadBehind(git: SimpleGit): Promise<[number, number]> {
+  const counts = (await git.raw(['rev-list', '--left-right', '--count', 'HEAD...FETCH_HEAD']))
+    .trim()
+    .split(/\s+/)
+    .map(Number);
+  return [counts[0], counts[1]];
+}
+
+async function isClean(git: SimpleGit): Promise<boolean> {
+  try {
+    const status = await git.status();
+    return status.files.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function pushBranch(
   git: SimpleGit,
   remote: string,
   branch: string,
   onlyShas?: Set<string>,
+  autoPull = false,
 ): Promise<PushOutcome> {
   try {
     const remotes = await git.getRemotes();
@@ -36,15 +53,32 @@ export async function pushBranch(
       throw error;
     }
 
-    const counts = (await git.raw(['rev-list', '--left-right', '--count', 'HEAD...FETCH_HEAD']))
-      .trim()
-      .split(/\s+/)
-      .map(Number);
-    const [ahead, behind] = counts;
-    if (behind > 0) {
-      return { status: 'skipped', detail: `${remote}/${branch} has ${behind} new commit(s), pull before the next run` };
+    let [ahead, behind] = await parseAheadBehind(git);
+
+    if (behind > 0 && autoPull) {
+      const clean = await isClean(git);
+      if (clean) {
+        try {
+          await git.raw(['pull', '--ff-only', remote, branch]);
+          [ahead, behind] = await parseAheadBehind(git);
+        } catch {
+          return {
+            status: 'blocked',
+            detail: `${remote}/${branch} is ${behind} commit(s) ahead and pull --ff-only failed — manual intervention required`,
+          };
+        }
+      }
     }
+
+    if (behind > 0) {
+      return {
+        status: 'blocked',
+        detail: `${remote}/${branch} is ${behind} commit(s) ahead of local branch — pull before pushing`,
+      };
+    }
+
     if (ahead === 0) return { status: 'skipped', detail: NOTHING_TO_PUSH };
+
     if (onlyShas) {
       const unpushed = (await git.raw(['rev-list', 'FETCH_HEAD..HEAD'])).split('\n').filter(Boolean);
       const foreign = unpushed.filter((sha) => !onlyShas.has(sha));
