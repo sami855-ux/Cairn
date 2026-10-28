@@ -6,11 +6,11 @@ import { errorText } from './util.js';
 type CheckResult = { ok: true } | { ok: false; reason: string };
 
 const IN_PROGRESS_MARKERS = [
-  ['MERGE_HEAD', 'merge in progress'],
-  ['CHERRY_PICK_HEAD', 'cherry-pick in progress'],
-  ['REVERT_HEAD', 'revert in progress'],
-  ['rebase-merge', 'rebase in progress'],
-  ['rebase-apply', 'rebase in progress'],
+  ['MERGE_HEAD', 'merging'],
+  ['CHERRY_PICK_HEAD', 'cherry-picking'],
+  ['REVERT_HEAD', 'reverting'],
+  ['rebase-merge', 'rebasing'],
+  ['rebase-apply', 'applying rebase'],
 ] as const;
 
 async function fileExists(p: string): Promise<boolean> {
