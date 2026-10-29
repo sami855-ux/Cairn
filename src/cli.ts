@@ -10,8 +10,10 @@ import { formatError, formatHeader, formatLabel, formatReport, formatSuccess, fo
 import { acquireLock, isLocked, LockHeldError, withLock } from './lock.js';
 import { cronLogPath, defaultConfigPath, lockPath, resolveRepoPath, stateDir } from './paths.js';
 import { NOTHING_TO_PUSH } from './push.js';
+import { intro, log, note, outro } from '@clack/prompts';
 import { recordPush, type PushRecord } from './history.js';
 import { registerHistory } from './history-command.js';
+import { formatRepoName, registerPrimary } from './primary-command.js';
 import { runAll } from './runner.js';
 import { openGit } from './scanner.js';
 import { exists } from './util.js';
@@ -44,25 +46,6 @@ const colorEnabled = (): boolean => {
 
 const formatOptions = () => ({ color: colorEnabled() });
 
-// function startLoader(): () => void {
-//   const colors = createColors(colorEnabled());
-//   const frames = ['●··', '·●·', '··●', '·●·'];
-//   let frame = 0;
-//   let active = true;
-//   const render = () => {
-//     process.stdout.write(`\r\x1B[2K  ${colors.cyan(frames[frame])}  ${colors.dim('applying changes')}`);
-//     frame = (frame + 1) % frames.length;
-//   };
-//   process.stdout.write('\x1B[?25l');
-//   render();
-//   const timer = setInterval(render, 140);
-//   return () => {
-//     if (!active) return;
-//     active = false;
-//     clearInterval(timer);
-//     process.stdout.write('\r\x1B[2K\x1B[?25h');
-//   };
-// }
 
 function command<T extends unknown[]>(fn: (...args: T) => Promise<void>) {
   return async (...args: T): Promise<void> => {
@@ -184,6 +167,84 @@ async function logPushes(config: Config, reports: RepoReport[]): Promise<void> {
   }
 }
 
+function renderReports(
+  config: Config,
+  reports: RepoReport[],
+  apply: boolean,
+  elapsedMs: number,
+  showScanHint: boolean,
+): void {
+  const colors = createColors(colorEnabled());
+  const title = apply ? 'cairn run' : 'cairn scan';
+  intro(title);
+
+  if (reports.length === 0) {
+    outro('No repositories configured');
+    return;
+  }
+
+  for (const report of reports) {
+    const base = path.basename(report.path);
+    const repoName = base.charAt(0).toUpperCase() + base.slice(1);
+    const branchTag = report.branch ? colors.cyan(`[${report.branch}]`) : '';
+    const isPrimary = config.primary && (report.path === config.primary || resolveRepoPath(report.path) === resolveRepoPath(config.primary));
+    const primaryTag = isPrimary ? colors.yellow('★ primary') : '';
+    const header = [repoName, branchTag, primaryTag].filter(Boolean).join(' ');
+
+    if (report.status === 'clean') {
+      log.message(`${colors.dim(repoName)}  ${branchTag}  ${primaryTag ? `${primaryTag}  ` : ''}${colors.green('● clean')}`.trim());
+      continue;
+    }
+
+    if (report.status === 'skipped') {
+      log.warn(`${header} · skipped: ${report.reason ?? 'no reason provided'}`);
+      continue;
+    }
+
+    if (report.status === 'failed') {
+      log.error(`${header} · failed: ${report.reason ?? 'unknown error'}`);
+      continue;
+    }
+
+    const lines: string[] = [];
+    const action = apply
+      ? colors.green(`✓ made ${report.commits.length} commit${report.commits.length === 1 ? '' : 's'}`)
+      : colors.cyan(`➜ would commit ${report.commits.length} commit${report.commits.length === 1 ? '' : 's'}`);
+    const pushInfo = report.push ? colors.dim(`(${report.push.detail})`) : '';
+    lines.push(`${action}  ${pushInfo}`.trim());
+
+    for (const commit of report.commits) {
+      const sha = commit.sha ? `${colors.dim(commit.sha.slice(0, 7))}  ` : '';
+      lines.push(`  ${colors.dim('•')} ${sha}${commit.message}`);
+    }
+
+    if (report.push && report.push.status !== 'planned' && report.push.status !== 'pushed') {
+      lines.push(colors.yellow(`  ⚠ push: ${report.push.detail}`));
+    }
+
+    for (const item of report.excluded) {
+      lines.push(colors.yellow(`  ⚠ excluded ${item.path} (${item.reason})`));
+    }
+
+    if (report.deferred > 0) {
+      lines.push(colors.dim(`  ↻ left ${report.deferred} file${report.deferred === 1 ? '' : 's'} for next run`));
+    }
+
+    note(lines.join('\n'), header);
+  }
+
+  const counts = new Map<RepoReport['status'], number>();
+  for (const r of reports) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
+  const parts = (['committed', 'planned', 'clean', 'skipped', 'failed'] as const)
+    .filter((s) => counts.has(s))
+    .map((s) => `${counts.get(s)} ${s}`);
+
+  const elapsed = `${(elapsedMs / 1000).toFixed(1)}s`;
+  const summary = `${reports.length} repo${reports.length === 1 ? '' : 's'} · ${parts.join(' · ')} (${elapsed})`;
+  const hint = showScanHint ? `  ${colors.cyan('run with --apply to commit')}` : '';
+  outro(`${summary}${hint}`);
+}
+
 async function execute(options: ExecuteOptions): Promise<void> {
   const config = await loadConfig(configFile());
   let elapsedMs = 0;
@@ -211,13 +272,7 @@ async function execute(options: ExecuteOptions): Promise<void> {
   if (options.json) {
     console.log(JSON.stringify({ apply: options.apply, reports }, null, 2));
   } else {
-    const presentation = formatOptions();
-    console.log(formatHeader(version, options.apply, presentation));
-    if (reports.length > 0) console.log();
-    console.log(reports.map((report) => formatReport(report, presentation)).join('\n\n'));
-    console.log();
-    console.log(formatSummary(reports, { ...presentation, apply: options.apply, elapsedMs }));
-    if (options.showScanHint) console.log(`\n${formatLabel('Hint', 'run with --apply to commit', presentation)}`);
+    renderReports(config, reports, options.apply, elapsedMs, Boolean(options.showScanHint));
   }
   if (reports.some((r) => r.status === 'failed' || r.push?.status === 'failed')) process.exitCode = 1;
 }
@@ -233,7 +288,8 @@ program
         throw new Error(`config already exists at ${file} (use --force to overwrite)`);
       }
       await saveConfig(defaultConfig(), file);
-      console.log(formatSuccess(`created ${file}`, formatOptions()));
+      intro('cairn init');
+      outro(`Created configuration file at ${file}`);
     }),
   );
 
@@ -244,18 +300,16 @@ aiCommand
   .description('test the AI provider with a sample diff')
   .action(
     command(async () => {
+      intro('cairn ai check');
       const config = await loadConfig(configFile());
       const aiConfig = config.commit.ai;
-      const presentation = formatOptions();
-      console.log(formatLabel('Model', `${aiConfig.model} at ${aiConfig.baseUrl}`, presentation));
+      note(`Model:   ${aiConfig.model}\nBase:    ${aiConfig.baseUrl}`, 'AI Configuration');
       if (!aiConfig.enabled) throw new Error('AI is disabled, set commit.ai.enabled to true in your config');
       const result = await checkAi(aiConfig);
       if (!result.ok) throw new Error(`AI check failed: ${result.error}`);
-      console.log(formatSuccess(`AI check passed: ${result.message}`, presentation));
+      outro(`AI check passed: ${result.message}`);
     }),
   );
-
-
 
 program
   .command('add <path>')
@@ -284,7 +338,8 @@ program
         enabled: true,
       });
       await saveConfig(config, configFile());
-      console.log(formatSuccess(`added ${root}`, formatOptions()));
+      intro('cairn add');
+      outro(`Added repository ${formatRepoName(root)} (${root})`);
     }),
   );
 
@@ -298,8 +353,12 @@ program
       const before = config.repos.length;
       config.repos = config.repos.filter((r) => resolveRepoPath(r.path) !== resolved);
       if (config.repos.length === before) throw new Error(`${resolved} is not configured`);
+      if (config.primary && resolveRepoPath(config.primary) === resolved) {
+        delete config.primary;
+      }
       await saveConfig(config, configFile());
-      console.log(formatSuccess(`removed ${resolved}`, formatOptions()));
+      intro('cairn remove');
+      outro(`Removed repository ${formatRepoName(resolved)}`);
     }),
   );
 
@@ -656,8 +715,9 @@ program
         configFile: program.opts<{ config?: string }>().config ? configFile() : undefined,
       });
       await writeCrontab(mergeCrontab(await readCrontab(), line));
-      console.log(formatSuccess(`scheduled daily at ${time}, ${options.apply ? 'committing and pushing' : 'dry run only'}`, formatOptions()));
-      console.log(formatLabel('Cron', line, formatOptions()));
+      intro('cairn install');
+      note(`Schedule: daily at ${time}\nMode:     ${options.apply ? 'commit and push' : 'dry run only'}\nCron:     ${line}`, 'Cron Setup');
+      outro('Successfully installed cron job');
     }),
   );
 
@@ -666,13 +726,14 @@ program
   .description('remove the cron job')
   .action(
     command(async () => {
+      intro('cairn uninstall');
       const existing = await readCrontab();
       if (!hasCronBlock(existing)) {
-        console.log(formatLabel('Cron', 'no cairn cron job found', formatOptions()));
+        outro('No cairn cron job found');
         return;
       }
       await writeCrontab(stripCrontab(existing));
-      console.log(formatSuccess('removed the cron job', formatOptions()));
+      outro('Successfully removed the cron job');
     }),
   );
 
@@ -681,23 +742,32 @@ program
   .description('show config, schedule and run state')
   .action(
     command(async () => {
+      intro('cairn status');
       const file = configFile();
       const present = await exists(file);
-      const presentation = formatOptions();
-      console.log(formatLabel('Config', `${file}${present ? '' : ' (missing)'}`, presentation));
+      const lines: string[] = [`Config:       ${file}${present ? '' : ' (missing)'}`];
       if (present) {
         const config = await loadConfig(file);
-        console.log(formatLabel('Repos', `${config.repos.length} (${config.repos.filter((r) => r.enabled).length} enabled)`, presentation));
-        console.log(formatLabel('Default mode', config.dryRun ? 'dry run' : 'apply', presentation));
-        console.log(formatLabel('Schedule', config.schedule.time, presentation));
+        const primary = config.primary ? formatRepoName(config.primary) : 'none';
+        lines.push(
+          `Repos:        ${config.repos.length} (${config.repos.filter((r) => r.enabled).length} enabled)`,
+          `Primary:      ${primary}`,
+          `Default mode: ${config.dryRun ? 'dry run' : 'apply'}`,
+          `Schedule:     ${config.schedule.time}`,
+        );
       }
       const cron = await readCrontab().catch(() => '');
-      console.log(formatLabel('Cron', hasCronBlock(cron) ? 'installed' : 'not installed', presentation));
-      console.log(formatLabel('Running now', (await isLocked(lockPath())) ? 'yes' : 'no', presentation));
-      console.log(formatLabel('Cron log', cronLogPath(), presentation));
+      lines.push(
+        `Cron:         ${hasCronBlock(cron) ? 'installed' : 'not installed'}`,
+        `Running now:  ${(await isLocked(lockPath())) ? 'yes' : 'no'}`,
+        `Cron log:     ${cronLogPath()}`,
+      );
+      note(lines.join('\n'), 'System Status');
+      outro('Status check complete');
     }),
   );
 
+registerPrimary(program, configFile);
 registerHistory(program);
 
 await program.parseAsync(process.argv);

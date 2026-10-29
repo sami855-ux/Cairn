@@ -226,7 +226,16 @@ export interface RunOptions {
 
 export async function runAll(config: Config, options: RunOptions): Promise<RepoReport[]> {
   const target = options.only ? resolveRepoPath(options.only) : null;
-  const repos = target ? config.repos.filter((r) => resolveRepoPath(r.path) === target) : config.repos;
+  let repos = target ? config.repos.filter((r) => resolveRepoPath(r.path) === target) : config.repos;
+  if (config.primary) {
+    const primaryPath = resolveRepoPath(config.primary);
+    const primaryRepo = repos.find(
+      (r) => r.path === config.primary || resolveRepoPath(r.path) === primaryPath,
+    );
+    if (primaryRepo) {
+      repos = [primaryRepo, ...repos.filter((r) => r !== primaryRepo)];
+    }
+  }
   const now = options.now ?? new Date();
   const key = options.apply ? 'lastDone' : 'lastPreview';
   const state = await loadState(options.stateFile);

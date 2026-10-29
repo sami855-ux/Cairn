@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import { defaultConfigPath } from './paths.js';
+import { defaultConfigPath, resolveRepoPath } from './paths.js';
 
 export const DEFAULT_BLOCKED_PATHS = [
   '.env',
@@ -61,6 +61,7 @@ const aiSchema = z
 
 const configSchema = z
   .object({
+    primary: z.string().min(1).optional(),
     dryRun: z.boolean().default(true),
     allowedBranches: z.array(z.string().min(1)).min(1).default(['main', 'master']),
     repos: z.array(repoSchema).default([]),
@@ -95,7 +96,22 @@ const configSchema = z
       .strict()
       .default({}),
   })
-  .strict();
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.primary !== undefined) {
+      const primary = data.primary;
+      const match = data.repos.some(
+        (r) => r.path === primary || resolveRepoPath(r.path) === resolveRepoPath(primary),
+      );
+      if (!match) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['primary'],
+          message: `primary repository "${primary}" is not in repos`,
+        });
+      }
+    }
+  });
 
 export type Config = z.infer<typeof configSchema>;
 export type RepoConfig = z.infer<typeof repoSchema>;
