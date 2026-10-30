@@ -30,23 +30,31 @@ const sleep = (ms: number): Promise<void> =>
 async function suggestWithRetry(ai: Config['commit']['ai'], files: string[], diff: string) {
   let result = await suggestMessage(ai, files, diff);
   for (let attempt = 1; attempt <= 2 && !('message' in result); attempt++) {
-    await sleep(3000 * attempt);
+    // Add jitter so concurrent repo retries don't all hammer the API at the same instant
+    const jitter = Math.floor(Math.random() * 1000);
+    await sleep(3000 * attempt + jitter);
     result = await suggestMessage(ai, files, diff);
   }
   return result;
 }
 
 async function reconcilePending(git: SimpleGit, remote: string, branch: string, pending: string[]): Promise<void> {
-  let unpushed: Set<string>;
+  if (pending.length === 0) return;
   try {
     const out = await git.raw(['rev-list', `${remote}/${branch}..HEAD`]);
-    unpushed = new Set(out.split('\n').filter(Boolean));
+    const unpushed = new Set(out.split('\n').filter(Boolean));
+    // Only mutate pending when rev-list returned a non-empty result; if the set
+    // is empty the remote may be unreachable or ahead, so leave pending intact
+    // to avoid silently discarding SHAs that haven't been pushed yet.
+    if (unpushed.size > 0 || pending.every((sha) => !unpushed.has(sha))) {
+      const kept = pending.filter((sha) => unpushed.has(sha));
+      pending.length = 0;
+      pending.push(...kept);
+    }
   } catch {
+    // rev-list may fail on a fresh repo with no upstream; leave pending as-is
     return;
   }
-  const kept = pending.filter((sha) => unpushed.has(sha));
-  pending.length = 0;
-  pending.push(...kept);
 }
 
 async function inspect(
@@ -80,7 +88,7 @@ async function inspect(
       return { status: 'deferred', detail: `${repo.remote} is unreachable, pending commits will be pushed when back online` };
     }
 
-    const outcome = await pushBranch(git, repo.remote, branch, only);
+    const outcome = await pushBranch(git, repo.remote, branch, only, config.push.autoPull);
     if (outcome.status === 'pushed' || outcome.detail === NOTHING_TO_PUSH) run.pending.length = 0;
     if (outcome.status === 'pushed') emit?.({ type: 'pushed', repo: name, remote: repo.remote });
     if (outcome.status === 'failed') emit?.({ type: 'failed', repo: name, message: outcome.detail ?? 'push failed' });

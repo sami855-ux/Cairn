@@ -19,7 +19,15 @@ async function rejectReason(root: string, change: FileChange, config: Config): P
     return 'file is missing';
   }
   if (stat.isDirectory()) return 'directory or nested repository';
-  if (stat.isSymbolicLink()) return null;
+  if (stat.isSymbolicLink()) {
+    // Symlinks skip content scanning (can't read through them reliably),
+    // but must still pass the path-based blocked list so that a symlink
+    // pointing at a secret file (e.g. .env, id_rsa) is correctly excluded.
+    if (!matchesAny(change.path, allowedPaths) && matchesAny(change.path, blockedPaths)) {
+      return 'blocked path';
+    }
+    return null;
+  }
   if (stat.size > maxFileSizeBytes) return 'file too large';
   const content = await fs.readFile(full);
   if (isBinary(content)) return null;

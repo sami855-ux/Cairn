@@ -21,6 +21,7 @@ import { checkAi } from './ai.js';
 import { createProgress } from './progress.js';
 import { notify } from './notify.js';
 import type { RepoReport } from './types.js';
+import { colorEnabled, formatOptions, command } from './command-utils.js';
 
 process.env.GIT_TERMINAL_PROMPT = '0';
 
@@ -37,26 +38,6 @@ program
 
 const configFile = (): string => path.resolve(program.opts<{ config?: string }>().config ?? defaultConfigPath());
 
-const colorEnabled = (): boolean => {
-  if (process.env.FORCE_COLOR === '0') return false;
-  if (process.env.FORCE_COLOR !== undefined) return true;
-  if (process.env.NO_COLOR !== undefined) return false;
-  return Boolean(process.stdout.isTTY);
-};
-
-const formatOptions = () => ({ color: colorEnabled() });
-
-
-function command<T extends unknown[]>(fn: (...args: T) => Promise<void>) {
-  return async (...args: T): Promise<void> => {
-    try {
-      await fn(...args);
-    } catch (error) {
-      console.error(formatError(error instanceof Error ? error.message : String(error), formatOptions()));
-      process.exitCode = 1;
-    }
-  };
-}
 
 interface ExecuteOptions {
   apply: boolean;
@@ -163,7 +144,11 @@ async function logPushes(config: Config, reports: RepoReport[]): Promise<void> {
 
     try {
       await recordPush(record);
-    } catch {}
+    } catch (err) {
+      // Non-fatal: history write failure should never abort a successful run,
+      // but we surface it so the user is aware (e.g. disk full, permissions).
+      console.warn(`[cairn] warning: could not write push history — ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
 

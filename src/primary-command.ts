@@ -2,28 +2,9 @@ import path from 'node:path';
 import { cancel, intro, isCancel, outro, select } from '@clack/prompts';
 import type { Command } from 'commander';
 import { loadConfig, saveConfig } from './config.js';
-import { formatError } from './format.js';
 import { defaultConfigPath, resolveRepoPath } from './paths.js';
+import { colorEnabled, formatOptions, command } from './command-utils.js';
 
-const colorEnabled = (): boolean => {
-  if (process.env.FORCE_COLOR === '0') return false;
-  if (process.env.FORCE_COLOR !== undefined) return true;
-  if (process.env.NO_COLOR !== undefined) return false;
-  return Boolean(process.stdout.isTTY);
-};
-
-const formatOptions = () => ({ color: colorEnabled() });
-
-function command<T extends unknown[]>(fn: (...args: T) => Promise<void>) {
-  return async (...args: T): Promise<void> => {
-    try {
-      await fn(...args);
-    } catch (error) {
-      console.error(formatError(error instanceof Error ? error.message : String(error), formatOptions()));
-      process.exitCode = 1;
-    }
-  };
-}
 
 export function formatRepoName(repoPath: string): string {
   const base = path.basename(repoPath);

@@ -25,8 +25,20 @@ Dry run is the default across all commands. Nothing is committed or pushed unles
   - [Global Options](#global-options)
   - [Commands Overview](#commands-overview)
   - [Detailed Command Usage](#detailed-command-usage)
+    - [`cairn init`](#cairn-init)
+    - [`cairn add [path]`](#cairn-add-path)
+    - [`cairn remove [path]`](#cairn-remove-path)
+    - [`cairn primary`](#cairn-primary)
+    - [`cairn list` / `ls`](#cairn-list--ls)
+    - [`cairn scan`](#cairn-scan)
+    - [`cairn run`](#cairn-run)
+    - [`cairn status`](#cairn-status)
+    - [`cairn ai check`](#cairn-ai-check)
+    - [`cairn install`](#cairn-install)
+    - [`cairn uninstall`](#cairn-uninstall)
 - [Configuration Guide](#configuration-guide)
   - [Configuration File Schema](#configuration-file-schema)
+  - [Primary Repository Prioritization](#primary-repository-prioritization)
   - [Repository Settings](#repository-settings)
   - [Commit & Split Settings](#commit--split-settings)
   - [Push Behavior & Unpushed Protection](#push-behavior--unpushed-protection)
@@ -52,11 +64,12 @@ Dry run is the default across all commands. Nothing is committed or pushed unles
 
 - **Zero Secret Leakage**: Integrated entropy and pattern scanners detect private keys, cloud tokens (AWS, GitHub, Slack, Stripe, Google), JWTs, credentials in URLs, and hardcoded secrets before files are staged.
 - **Safe By Default**: Runs non-destructive dry-run previews by default. Cairn will only write changes to disk or Git history when explicitly authorized.
+- **Primary Repository Prioritization**: Designate a high-priority repository that is always processed first in every run, spending from the global commit budget before other repositories.
 - **No Destructive Operations**: Cairn never runs `git pull`, `git rebase`, or `git push --force`. If upstream commits exist that you do not have locally, Cairn cleanly skips pushing and reports the condition.
 - **Flexible Commit Splitting**: Commit all safe changes together in one batch, or enable file-by-file splitting (`commit.split: "file"`) with configurable per-run caps to cleanly space out large changesets over days.
 - **Conventional Commit Intelligence**: Automatically formats commits with `{type}: {summary}` syntax, or routes sanitized diffs to local (Ollama) or hosted (Groq, Google Gemini, OpenRouter) models.
 - **Reliable Catch-Up Scheduler**: Cron triggers a lightweight check every 15 minutes and at reboot. If your machine was offline or asleep during the scheduled hour, Cairn commits and catches up as soon as it resumes.
-- **Rich Terminal & Machine-Readable Output**: Clean color-coded terminal reports, interactive spinners, tabular repository views, and structured `--json` output for headless pipelines.
+- **Vite-Style Modern Terminal Interface**: Clean, professional output powered by `@clack/prompts`, featuring capitalized repository names, branch badges, step-by-step progress, interactive selection menus, native OS file explorer integration (`--explorer`), and structured `--json` output for headless pipelines.
 
 ---
 
@@ -68,7 +81,10 @@ Cairn executes a multi-stage validation and commit pipeline:
 flowchart TD
     A[Start: cairn run / cron] --> B[Acquire Process Lock run.lock]
     B --> C[Load Config and State]
-    C --> D{Check Due Time?}
+    C --> P1{Primary Configured?}
+    P1 -- Yes --> P2[Sort Primary to Front of Run Queue]
+    P1 -- No --> D
+    P2 --> D{Check Due Time?}
     D -- Not Due --> E[Skip Repository]
     D -- Due or Manual --> F[Scan Repository via simple-git]
 
@@ -101,6 +117,9 @@ flowchart TD
     U --> Z[Release Lock]
 ```
 
+> [!NOTE]
+> When a `primary` repository is defined, Cairn moves it to the front of the execution queue while preserving the relative order of all remaining repositories. The global `commit.maxCommitsPerRun` cap is shared across the entire run; because the primary repository is processed first, it draws from the cap first.
+
 ---
 
 ## Project Directory Structure
@@ -119,15 +138,16 @@ cairn/
 │   └── cron-run.sh               # Helper wrapper for cron execution with desktop notifications
 ├── src/                          # TypeScript source code
 │   ├── ai.ts                     # AI commit message generator (OpenAI-compatible APIs)
-│   ├── cli.ts                    # Commander CLI definitions, option parsing, table rendering
+│   ├── cli.ts                    # Commander CLI definitions, option parsing, Clack UI rendering
 │   ├── commit.ts                 # Staging validation, commit grouping, and message formatters
 │   ├── config.ts                 # Zod schema definitions, defaults, config file loader/saver
 │   ├── cron.ts                   # Crontab parsing, block merging, and schedule generation
 │   ├── due.ts                    # Due-time calculation and catch-up eligibility checks
-│   ├── format.ts                 # Picocolors terminal formatting, status labels, run summaries
+│   ├── format.ts                 # Terminal formatting helpers and color helpers
 │   ├── glob.ts                   # Lightweight glob matcher for path whitelists and blacklists
 │   ├── lock.ts                   # PID-based file locker with stale process detection
 │   ├── paths.ts                  # XDG directory resolution (~/.config/cairn, ~/.local/state)
+│   ├── primary-command.ts        # Primary repository management and interactive selector
 │   ├── push.ts                   # Remote push engine, ahead/behind checks, unpushed safeguards
 │   ├── runner.ts                 # Central orchestration pipeline coordinating scan, commit & push
 │   ├── safety.ts                 # Change validation against file size, path blocks, and secrets
@@ -135,7 +155,7 @@ cairn/
 │   ├── secrets.ts                # Secret scanning engine (regex patterns for keys, tokens, JWTs)
 │   ├── state.ts                  # State persistence (timestamps, pending commit SHAs)
 │   ├── types.ts                  # Common TypeScript interfaces and data models
-│   └── util.ts                   # Utility functions (error stringification, file existence)
+│   └── util.ts                   # Utility functions, error handling, and OS folder dialog
 └── tests/                        # Vitest test suite
     ├── ai.test.ts                # Unit tests for AI message sanitization, diff truncating, API client
     ├── commit.test.ts            # Commit message rule generation and commit splitting tests
@@ -145,6 +165,7 @@ cairn/
     ├── format.test.ts            # Output report formatting and pluralization tests
     ├── glob.test.ts              # Path globbing logic tests
     ├── helpers.ts                # Vitest testing utilities (ephemeral git repos, mock HTTP server)
+    ├── primary.test.ts           # Primary repository ordering, validation, and CLI command tests
     ├── secrets.test.ts           # Secret detector rule coverage and false positive prevention tests
     ├── state.test.ts             # State file serialization and deserialization tests
     └── workflow.test.ts          # End-to-end integration tests on real temporary Git repositories
@@ -202,11 +223,30 @@ cairn init
 Register repositories you want Cairn to track:
 
 ```bash
+# Interactive folder selection (current dir, OS file explorer, or manual input)
+cairn add
+
+# Open your operating system's native file explorer dialog directly
+cairn add --explorer
+
+# Or register paths directly
 cairn add ~/projects/my-web-app
 cairn add ~/work/docs-repo --branch main
 ```
 
-### 3. Preview pending changes (Dry Run)
+### 3. Set a primary repository (Optional)
+
+Designate your top-priority repository so it runs first and draws from the daily commit budget before others:
+
+```bash
+# Interactive menu with capitalized repository names
+cairn primary
+
+# Or set directly by folder name or path
+cairn primary set my-web-app
+```
+
+### 4. Preview pending changes (Dry Run)
 
 Run a safe scan across all registered repositories:
 
@@ -214,9 +254,9 @@ Run a safe scan across all registered repositories:
 cairn scan
 ```
 
-Cairn inspects the repositories, filters out any secrets or oversized files, and displays what commit messages would be generated—without touching your Git state.
+Cairn inspects the repositories, audits for secrets and size constraints, and displays planned commits in a clean Vite-style terminal view—without touching your Git state.
 
-### 4. Perform a real manual run
+### 5. Perform a real manual run
 
 To stage, commit, and push your changes for real:
 
@@ -224,7 +264,7 @@ To stage, commit, and push your changes for real:
 cairn run --apply
 ```
 
-### 5. Install the daily background scheduler
+### 6. Install the daily background scheduler
 
 Install the automatic scheduler into your user's crontab:
 
@@ -249,9 +289,10 @@ All commands accept the following global flags:
 | Command | Description |
 | :--- | :--- |
 | [`init`](#cairn-init) | Generate the initial configuration file with safe defaults. |
-| [`add <path>`](#cairn-add-path) | Register a Git repository with remote, branch, and push options. |
-| [`remove <path>`](#cairn-remove-path) | Unregister a Git repository from configuration. |
-| [`list` / `ls`](#cairn-list--ls) | Display an interactive table of all configured repositories and status. |
+| [`add [path]`](#cairn-add-path) | Register a Git repository (interactive selector or file explorer if omitted). |
+| [`remove [path]`](#cairn-remove-path) | Unregister a Git repository (interactive selector if omitted). |
+| [`primary`](#cairn-primary) | Manage or interactively select the primary prioritized repository. |
+| [`list` / `ls`](#cairn-list--ls) | Display configured repositories with status, branch, and primary badges. |
 | [`scan`](#cairn-scan) | Inspect repositories and preview planned commits without modifying anything. |
 | [`run`](#cairn-run) | Execute the commit and push pipeline (dry run unless `--apply` is specified). |
 | [`status`](#cairn-status) | Print the current system state, configuration path, lock status, and cron log. |
@@ -273,43 +314,112 @@ cairn init [--force]
 
 - `--force`: Overwrites an existing `config.json` file.
 
-#### `cairn add <path>`
+#### `cairn add [path]`
 
-Registers a local Git repository with Cairn. Validates that the path exists and is a valid Git repository root.
+Registers a local Git repository with Cairn. Validates that the path exists and is a valid Git repository root (`git rev-parse --show-toplevel`).
 
 ```bash
+# Interactive mode (choose current dir, open file explorer, or type path)
+cairn add
+
+# Open system file explorer dialog directly
+cairn add -e
+cairn add --explorer
+
+# Specify path directly with optional flags
 cairn add <path> [--remote <name>] [--branch <name>] [--no-push]
 ```
 
-- `<path>`: Filepath to the repository (supports `~` expansion).
+- `[path]`: Filepath to the repository (supports `~` expansion). If omitted, Cairn displays an interactive menu:
+  - **Current directory**: Uses the current working directory.
+  - **Choose in file explorer...**: Opens your system's native folder picker (Linux Zenity/KDialog, macOS AppleScript, or Windows PowerShell).
+  - **Enter path manually...**: Prompts for a manual path string.
+- `-e, --explorer`: Automatically opens your system's native file explorer dialog to select a folder.
 - `--remote <name>`: Upstream remote name (defaults to `origin`).
 - `--branch <name>`: Restrict commits to this branch only.
 - `--no-push`: Stage and commit changes locally, but never push to remote.
 
-#### `cairn remove <path>`
+#### `cairn remove [path]`
 
 Unregisters a repository from Cairn's configuration.
 
 ```bash
-cairn remove <path>
+# Interactive selection prompt
+cairn remove
+
+# Direct removal by path or folder name
+cairn remove <path|name>
 ```
+
+- `[path]`: Optional path or folder name. If omitted, Cairn displays an interactive selection menu listing all configured repositories with current primary indicators (`★ primary`).
+- **Primary Cleanup**: If the removed repository was currently set as `primary`, Cairn automatically removes the `primary` setting from your configuration.
+
+#### `cairn primary`
+
+Manages the primary repository. The primary repository is always processed first in every run, claiming from the shared commit budget before other repositories.
+
+```bash
+# Interactive selection prompt
+cairn primary
+
+# Set primary repository directly by path or folder name
+cairn primary set <path|name>
+
+# Clear the primary repository
+cairn primary clear
+```
+
+- `cairn primary`: Displays an interactive `@clack/prompts` menu listing configured repositories with capitalized folder names and marking the current primary. Selecting a repository sets it as primary; selecting "None (no primary)" clears the setting.
+- `cairn primary set <path|name>`: Validates that `<path>` or folder name matches an existing configured repository, then sets it as `primary`.
+- `cairn primary clear`: Clears the primary repository setting.
 
 #### `cairn list` (Alias: `ls`)
 
-Displays a formatted terminal table showing configured repositories, status, branches, push remotes, and local paths.
+Displays a clean, Vite-style terminal view of configured repositories, status, branches, push remotes, and primary badges.
 
 ```bash
 cairn list [--json]
 ```
 
-- `--json`: Outputs the list of repositories in machine-readable JSON format.
+Terminal output:
+```text
+┌  cairn list
+│
+◇  HabeshaGo  [production]  ★ primary
+│  ● /home/sam/projects/HabeshaGo  → origin
+│
+◇  Docs-repo  [main]
+│  ● /home/sam/projects/docs-repo  → origin  · 18:00
+│
+◇  Notes
+│  ○ /home/sam/projects/notes  (no push)
+│
+└  3 repositories · 2 enabled · 2 pushing
+```
+
+- `--json`: Outputs the list of repositories in machine-readable JSON format, including `name`, `path`, `enabled`, `remote`, `branch`, `push`, and `primary: boolean`.
 
 #### `cairn scan`
 
-Performs an end-to-end dry-run audit of changes across all repositories (or a single repository), displaying planned commits, excluded files, and push intentions.
+Performs an end-to-end dry-run audit of changes across all repositories (or a single repository), displaying planned commits, excluded files, and push intentions in a clean Vite-style terminal format.
 
 ```bash
 cairn scan [--repo <path>] [--json]
+```
+
+Terminal output:
+```text
+┌  cairn scan
+│
+◇  HabeshaGo [production] ★ primary
+│  ➜ would commit 2 commits  (2 commits to push to origin/production)
+│    • chore: update auth service
+│    • docs: update README setup guide
+│    ⚠ excluded .env.local (blocked path: .env.*)
+│
+◇  Notes ● clean
+│
+└  2 repos · 1 planned · 1 clean (0.3s)  run with --apply to commit
 ```
 
 - `--repo <path>`: Scan only the specified repository.
@@ -382,6 +492,7 @@ Here is a fully annotated example configuration:
 {
   "$schema": "https://json.schemastore.org/cairn.json",
   "dryRun": true,
+  "primary": "/home/sam/projects/web-app",
   "allowedBranches": ["main", "master"],
   "repos": [
     {
@@ -457,6 +568,16 @@ Here is a fully annotated example configuration:
   }
 }
 ```
+
+---
+
+### Primary Repository Prioritization
+
+- `primary` *(string, optional)*: Absolute or tilde-prefixed path to one of the configured repositories in `repos`.
+  - **Run Order**: When set, Cairn always evaluates and processes this repository first before any other repositories in `cairn run`, `cairn scan`, or scheduled cron executions. The remaining repositories continue in their existing configuration order.
+  - **Shared Budget Priority**: The global `commit.maxCommitsPerRun` cap is shared across the entire run. Because the primary repository runs first, it draws from the commit budget first, ensuring your primary project never misses commits when daily caps are reached.
+  - **Validation**: Cairn validates via Zod that any configured `primary` path strictly matches a repository present in `repos`.
+  - **CLI Management**: Easily configure or switch your primary repository via [`cairn primary`](#cairn-primary), `cairn primary set <path|name>`, or `cairn primary clear`.
 
 ---
 
