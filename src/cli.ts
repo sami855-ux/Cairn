@@ -20,6 +20,8 @@ import { exists, openFolderDialog } from './util.js';
 import { checkAi } from './ai.js';
 import { createProgress } from './progress.js';
 import { notify } from './notify.js';
+import { clearWeeklyLogs } from './log-cleanup.js';
+import { registerConfig } from './config-command.js';
 import type { RepoReport } from './types.js';
 import { colorEnabled, formatOptions, command } from './command-utils.js';
 
@@ -98,8 +100,8 @@ const announce = (reports: RepoReport[]): void => {
   } else if (deferred > 0) {
     const repoWord = deferred === 1 ? 'repo' : 'repos';
     notify(
-      `↻ cairn — push deferred (offline)`,
-      `${deferred} ${repoWord} will sync to remote when back online`,
+      `↻ cairn — push deferred`,
+      `${deferred} ${repoWord} waiting to sync: ${reports.find((r) => r.push?.status === 'deferred')?.push?.detail ?? 'retry pending'}`,
       'normal',
       'network-offline',
     );
@@ -178,11 +180,13 @@ function renderReports(
 
     if (report.status === 'clean') {
       log.message(`${colors.dim(repoName)}  ${branchTag}  ${primaryTag ? `${primaryTag}  ` : ''}${colors.green('● clean')}`.trim());
+      if (report.push) log.message(`Push ${report.push.status}: ${report.push.detail}`);
       continue;
     }
 
     if (report.status === 'skipped') {
       log.warn(`${header} · skipped: ${report.reason ?? 'no reason provided'}`);
+      if (report.push) log.message(`Push ${report.push.status}: ${report.push.detail}`);
       continue;
     }
 
@@ -231,6 +235,7 @@ function renderReports(
 }
 
 async function execute(options: ExecuteOptions): Promise<void> {
+  if (options.apply || options.due) await clearWeeklyLogs();
   const config = await loadConfig(configFile());
   let elapsedMs = 0;
   const reporting = options.apply && !options.json;
@@ -250,6 +255,7 @@ async function execute(options: ExecuteOptions): Promise<void> {
   } finally {
     progress?.stop();
   }
+  if (options.due && reports.length === 0 && !options.json) return;
   if (options.apply) {
     await logPushes(config, reports);
   }
@@ -665,6 +671,7 @@ program
   );
 
 registerPrimary(program, configFile);
+registerConfig(program, configFile);
 registerHistory(program);
 
 await program.parseAsync(process.argv);

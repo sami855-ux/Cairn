@@ -24,6 +24,7 @@ export function buildCronLine(options: CronOptions): string {
   args.push('run');
   if (options.apply) args.push('--apply');
   args.push('--due');
+  args.push('--no-notify');
   const searchPath = [path.dirname(options.node), '/usr/local/bin', '/usr/bin', '/bin'].join(':');
   const command = `PATH=${shellQuote(searchPath)} ${args.join(' ')} >> ${shellQuote(options.logFile)} 2>&1`.replace(
     /%/g,

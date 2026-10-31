@@ -26,4 +26,10 @@ describe('state', () => {
     fs.writeFileSync(target, JSON.stringify({ '/a': 'text', '/b': { pending: [1, 'ok'], lastDone: 5 } }));
     expect(await loadState(target)).toEqual({ '/b': { lastDone: undefined, lastPreview: undefined, pending: ['ok'] } });
   });
+
+  it('persists commits waiting for descriptive messages', async () => {
+    const target = file();
+    await saveState({ '/repo': { pending: ['abc'], awaitingMessages: ['abc'] } }, target);
+    expect((await loadState(target))['/repo'].awaitingMessages).toEqual(['abc']);
+  });
 });

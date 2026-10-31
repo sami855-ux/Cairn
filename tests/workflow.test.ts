@@ -400,17 +400,69 @@ describe('AI commit messages', () => {
     expect(report.commits[0].aiError).toMatch(/valid commit message/);
   });
 
-  it('falls back when the server is down and still pushes', async () => {
+  it('commits locally when the server is down and defers pushing', async () => {
     const { dir, remote } = makeRepo();
     const server = await mockAi(() => ({ content: 'fix: gone' }));
     const url = server.baseUrl;
+    const published = git(remote, 'rev-parse', 'main');
     await server.close();
     servers.pop();
     write(dir, 'a.ts', '1\n');
     const report = await run(dir, true, withAi(url));
     expect(report.commits[0].message).toBe('chore: add a.ts');
-    expect(report.push?.status).toBe('pushed');
+    expect(report.push?.status).toBe('deferred');
+    expect(git(remote, 'rev-parse', 'main')).toBe(published);
+    expect(git(dir, 'status', '--porcelain')).toBe('');
+  });
+
+  it('persists offline commits and improves their messages before the next push', async () => {
+    const { root, dir, remote } = makeRepo();
+    let online = false;
+    const server = await mockAi((request) => online
+      ? { content: request.body.messages[1].content.includes('login.ts') ? 'feat: add login handler' : 'feat: add logout handler' }
+      : { status: 503 });
+    const cfg = parseConfig({ repos: [{ path: dir, time: '00:00' }], commit: {
+      split: 'file', ai: { enabled: true, baseUrl: server.baseUrl },
+    } });
+    const stateFile = path.join(root, 'state.json');
+    const now = new Date(2026, 0, 1, 12);
+    write(dir, 'login.ts', 'export const login = 1;\n');
+    write(dir, 'logout.ts', 'export const logout = 1;\n');
+    const first = await runAll(cfg, { apply: true, due: true, stateFile, now });
+    expect(first[0].push?.status).toBe('deferred');
+    const oldHead = git(dir, 'rev-parse', 'HEAD');
+    const tree = git(dir, 'rev-parse', 'HEAD^{tree}');
+    const identities = git(dir, 'log', '-2', '--format=%an %ae %aI %cn %ce %cI');
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf8'))[dir].awaitingMessages).toHaveLength(2);
+    online = true;
+    const next = await runAll(cfg, { apply: true, due: true, stateFile, now });
+    expect(next[0].push?.status).toBe('pushed');
+    expect(git(dir, 'rev-parse', 'HEAD')).not.toBe(oldHead);
+    expect(git(dir, 'rev-parse', 'HEAD^{tree}')).toBe(tree);
+    expect(git(dir, 'log', '-2', '--format=%an %ae %aI %cn %ce %cI')).toBe(identities);
+    expect(git(dir, 'log', '-2', '--format=%s')).toBe('feat: add logout handler\nfeat: add login handler');
     expect(git(remote, 'rev-parse', 'main')).toBe(git(dir, 'rev-parse', 'HEAD'));
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf8'))[dir].awaitingMessages).toEqual([]);
+    expect(await runAll(cfg, { apply: true, due: true, stateFile, now })).toEqual([]);
+  });
+
+  it('does not rewrite manual descendants even when includePending is enabled', async () => {
+    const { root, dir } = makeRepo();
+    let online = false;
+    const server = await mockAi(() => online ? { content: 'feat: improve behavior' } : { status: 503 });
+    const cfg = parseConfig({ repos: [{ path: dir }], push: { includePending: true }, ...withAi(server.baseUrl) });
+    const stateFile = path.join(root, 'state.json');
+    write(dir, 'a.ts', '1\n');
+    await runAll(cfg, { apply: true, stateFile });
+    write(dir, 'manual.ts', '2\n');
+    git(dir, 'add', 'manual.ts');
+    git(dir, 'commit', '-m', 'manual work');
+    const head = git(dir, 'rev-parse', 'HEAD');
+    online = true;
+    const next = await runAll(cfg, { apply: true, stateFile });
+    expect(next[0].push?.status).toBe('deferred');
+    expect(next[0].push?.detail).toContain('manual commits');
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
   });
 
   it('stops asking after the first failure in a run', async () => {
@@ -603,16 +655,19 @@ describe('runAll due scheduling', () => {
     expect(await tick(at(9, 45))).toEqual([]);
   });
 
-  it('does not let a manual run use up the scheduled run', async () => {
+  it('skips scheduled checks after a manual push until the next day', async () => {
     const { root, dir } = makeRepo();
     const stateFile = stateFileFor(root);
     const cfg = parseConfig({ repos: [{ path: dir, time: '00:00' }] });
     write(dir, 'a.ts', '1\n');
-    await runAll(cfg, { apply: true, now: at(10), stateFile });
+    const manual = await runAll(cfg, { apply: true, now: at(10), stateFile });
+    expect(manual[0].push?.status).toBe('pushed');
     write(dir, 'b.ts', '2\n');
     const scheduled = await runAll(cfg, { apply: true, due: true, now: at(10, 30), stateFile });
-    expect(scheduled).toHaveLength(1);
-    expect(scheduled[0].status).toBe('committed');
+    expect(scheduled).toEqual([]);
+    expect(git(dir, 'status', '--porcelain')).toContain('b.ts');
+    const tomorrow = await runAll(cfg, { apply: true, due: true, now: at(10, 0, 2), stateFile });
+    expect(tomorrow[0].push?.status).toBe('pushed');
   });
 
   it('keeps dry run previews from using up the real run', async () => {

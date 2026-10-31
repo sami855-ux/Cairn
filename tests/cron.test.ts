@@ -14,7 +14,7 @@ describe('cron', () => {
     expect(tick.startsWith('*/15 * * * * ')).toBe(true);
     expect(boot.startsWith('@reboot sleep 90 && ')).toBe(true);
     for (const line of [tick, boot]) {
-      expect(line).toContain("'/usr/bin/node' '/opt/cairn/dist/cli.js' run --apply --due");
+      expect(line).toContain("'/usr/bin/node' '/opt/cairn/dist/cli.js' run --apply --due --no-notify");
       expect(line).toContain(">> '/home/me/.local/state/cairn/cron.log' 2>&1");
     }
   });
@@ -22,7 +22,7 @@ describe('cron', () => {
   it('omits --apply for dry run jobs and passes a custom config', () => {
     const line = buildCronLine({ ...options, apply: false, configFile: '/tmp/my config.json' });
     expect(line).not.toContain('--apply');
-    expect(line).toContain("--config '/tmp/my config.json' run --due");
+    expect(line).toContain("--config '/tmp/my config.json' run --due --no-notify");
   });
 
   it('escapes percent signs and single quotes', () => {

@@ -63,7 +63,7 @@ export function splitChanges(
 
 export type Compose = (diff: string) => Promise<string | null>;
 
-const DIFF_EXCLUDES = ['*.lock', '*package-lock.json', '*pnpm-lock.yaml', '*.min.js', '*.map'];
+export const DIFF_EXCLUDES = ['*.lock', '*package-lock.json', '*pnpm-lock.yaml', '*.min.js', '*.map'];
 
 export async function commitChanges(
   git: SimpleGit,

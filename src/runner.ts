@@ -6,6 +6,7 @@ import { buildCommitMessage, commitChanges, splitChanges } from './commit.js';
 import { isDue, localDate } from './due.js';
 import { isRemoteReachable } from './net.js';
 import { resolveRepoPath } from './paths.js';
+import { preparePendingMessages } from './pending-messages.js';
 import type { ProgressEvent } from './progress.js';
 import { getRemoteUrl, NOTHING_TO_PUSH, pushBranch } from './push.js';
 import { buildPlan } from './safety.js';
@@ -16,6 +17,7 @@ import { errorText } from './util.js';
 
 export interface RepoRun {
   pending: string[];
+  awaitingMessages?: string[];
 }
 
 type Emit = (event: ProgressEvent) => void;
@@ -63,6 +65,7 @@ async function inspect(
   apply: boolean,
   run: RepoRun,
   emit?: Emit,
+  checkpoint: () => Promise<void> = async () => {},
 ): Promise<RepoReport> {
   const scan = await scanRepo(repo, config);
   const report = blankReport(scan.root, scan.branch, 'skipped');
@@ -77,10 +80,10 @@ async function inspect(
   report.excluded = plan.excluded;
 
   await reconcilePending(git, repo.remote, branch, run.pending);
+  run.awaitingMessages = run.awaitingMessages?.filter((sha) => run.pending.includes(sha));
+  let aiFailed = false;
 
   const publish = async (): Promise<PushOutcome> => {
-    const only = config.push.includePending ? undefined : new Set(run.pending);
-
     const remoteUrl = await getRemoteUrl(git, repo.remote);
     const online = remoteUrl ? await isRemoteReachable(remoteUrl) : true;
     if (!online) {
@@ -88,8 +91,29 @@ async function inspect(
       return { status: 'deferred', detail: `${repo.remote} is unreachable, pending commits will be pushed when back online` };
     }
 
+    if (config.commit.ai.enabled && run.awaitingMessages?.length) {
+      if (aiFailed) return { status: 'deferred', detail: 'committed locally; waiting for AI messages before pushing' };
+      try {
+        const replacements = await preparePendingMessages(git, repo.remote, branch, config.commit.ai, run, checkpoint);
+        for (const commit of report.commits) {
+          const replacement = commit.sha && replacements.get(commit.sha);
+          if (replacement) {
+            commit.sha = replacement.sha;
+            commit.message = replacement.message;
+            commit.source = 'ai';
+            delete commit.aiError;
+          }
+        }
+      } catch (error) {
+        return { status: 'deferred', detail: `committed locally; message update deferred: ${errorText(error)}` };
+      }
+    }
+    const only = config.push.includePending ? undefined : new Set(run.pending);
     const outcome = await pushBranch(git, repo.remote, branch, only, config.push.autoPull);
-    if (outcome.status === 'pushed' || outcome.detail === NOTHING_TO_PUSH) run.pending.length = 0;
+    if (outcome.status === 'pushed' || outcome.detail === NOTHING_TO_PUSH) {
+      run.pending.length = 0;
+      run.awaitingMessages = [];
+    }
     if (outcome.status === 'pushed') emit?.({ type: 'pushed', repo: name, remote: repo.remote });
     if (outcome.status === 'failed') emit?.({ type: 'failed', repo: name, message: outcome.detail ?? 'push failed' });
     return outcome;
@@ -162,6 +186,7 @@ async function inspect(
               return result.message;
             }
             state.error = result.error;
+            aiFailed = true;
             aiAvailable = false;
             return null;
           }
@@ -169,6 +194,8 @@ async function inspect(
     try {
       const done = await commitChanges(git, group, messages[index], compose);
       run.pending.push(done.sha);
+      if (ai.enabled && !state.used) (run.awaitingMessages ??= []).push(done.sha);
+      await checkpoint();
       report.commits.push({
         sha: done.sha,
         message: done.message,
@@ -207,11 +234,12 @@ export async function processRepo(
   apply: boolean,
   run: RepoRun = { pending: [] },
   emit?: Emit,
+  checkpoint: () => Promise<void> = async () => {},
 ): Promise<RepoReport> {
   const repoPath = resolveRepoPath(repo.path);
   if (!repo.enabled) return blankReport(repoPath, null, 'skipped', 'disabled');
   try {
-    return await inspect(repo, config, apply, run, emit);
+    return await inspect(repo, config, apply, run, emit, checkpoint);
   } catch (error) {
     emit?.({ type: 'failed', repo: path.basename(repoPath), message: errorText(error) });
     return blankReport(repoPath, null, 'failed', errorText(error));
@@ -253,8 +281,12 @@ export async function runAll(config: Config, options: RunOptions): Promise<RepoR
     const id = resolveRepoPath(repo.path);
     if (options.due && !isDue(repo, config, state[id], now, key)) continue;
     const entry = state[id] ?? { pending: [] };
-    const report = await processRepo(repo, config, options.apply, entry, options.onProgress);
-    if (options.due && finished(report)) entry[key] = localDate(now);
+    state[id] = entry;
+    const report = await processRepo(repo, config, options.apply, entry, options.onProgress,
+      () => saveState(state, options.stateFile));
+    if ((options.due && finished(report)) || (options.apply && report.push?.status === 'pushed')) {
+      entry[key] = localDate(now);
+    }
     state[id] = entry;
     if (options.apply || options.due) await saveState(state, options.stateFile);
     reports.push(report);

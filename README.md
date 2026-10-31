@@ -135,7 +135,7 @@ cairn/
 ├── PLAN.md                       # Architectural design notes and milestone tracker
 ├── README.md                     # Comprehensive project documentation
 ├── scripts/
-│   └── cron-run.sh               # Helper wrapper for cron execution with desktop notifications
+│   └── cron-run.sh               # Quiet cron wrapper with timestamped logs
 ├── src/                          # TypeScript source code
 │   ├── ai.ts                     # AI commit message generator (OpenAI-compatible APIs)
 │   ├── cli.ts                    # Commander CLI definitions, option parsing, Clack UI rendering
@@ -263,6 +263,32 @@ To stage, commit, and push your changes for real:
 ```bash
 cairn run --apply
 ```
+
+### Edit configuration in one command
+
+Run `cairn config` for an interactive settings menu. Edit multiple values, then choose **Save and exit**. Cancelling discards the changes.
+
+```bash
+# Change the daily time, enable AI, and set the commit limit together
+cairn config time=21:30 ai=true commit.maxCommitsPerRun=10
+
+# Push settings
+cairn config push.timeoutSeconds=90
+cairn config ai=false push.autoPull=true
+
+# Repository overrides (name or full path)
+cairn config --repo my-project time=18:00 enabled=true push=true
+cairn config --repo my-project time=null
+
+# Arrays use JSON; null resets a setting or removes an optional override
+cairn config 'allowedBranches=["main","master","develop"]'
+cairn config --show
+cairn --config /path/to/config.json config time=20:00
+```
+
+Global settings include schedule, AI enabled/disabled, commit splitting, maximum files and commits per run, allowed branches, and push options. Repository settings include time, enabled, push, branch, and remote. `time` is shorthand for `schedule.time`; `ai` is shorthand for `commit.ai.enabled`. All changes are validated together before saving. Manage repositories with the dedicated repository commands and the primary repository with `cairn primary`. Advanced settings remain editable directly in the JSON configuration file.
+
+Schedule changes apply on the next scheduler check; repositories already completed today remain completed. Repository time overrides take precedence over the global time. The installed job's explicit `--apply` flag takes precedence over `dryRun`.
 
 ### 6. Install the daily background scheduler
 
@@ -458,6 +484,10 @@ cairn ai check
 #### `cairn install`
 
 Installs Cairn's 15-minute polling loop and `@reboot` catch-up task into your crontab under an isolated `# BEGIN cairn` marker block.
+
+Background jobs use `--no-notify` to keep desktop notifications silent. Errors remain in the cron log; manual runs can still show notifications.
+
+Every seven days, the next scheduled or applied run clears `cron.log` and `history.jsonl`. Cleanup also runs when no repositories are due. If the computer is off, cleanup happens on the next run. `log-cleanup.json` tracks the weekly interval; `state.json`, pending commits, and configuration are preserved.
 
 ```bash
 cairn install [--apply] [--time <HH:MM>]
@@ -703,7 +733,7 @@ Configure `config.json`:
 
 1. **Security Filtering First**: Diffs sent to the AI model **only** contain files that have already passed all secret detection and size checks. Lockfiles (`package-lock.json`, `pnpm-lock.yaml`), minified bundles, and source maps are stripped from the diff context.
 2. **Byte Truncation**: Diffs are safely truncated at `maxDiffBytes` (default: `12,000` bytes) to prevent model context overflows.
-3. **Resilient Fallback**: If the AI endpoint times out, returns an HTTP error, or outputs text not conforming to Conventional Commits, Cairn automatically falls back to rule-based message generation without interrupting the run.
+3. **Resilient Fallback**: If the AI endpoint times out, returns an HTTP error, or outputs text not conforming to Conventional Commits, Cairn immediately saves local commits with rule-based messages and records them for a later message update. With AI enabled, pushing waits until descriptive messages can be generated from the saved commit diffs. On a later run, Cairn replaces only its unpublished linear commits before pushing, preserving their file contents, authors, and timestamps. It does not force-push or rewrite manual, merge, signed, or known published commits. If such history prevents an automatic update, the push stays deferred with a reason. Disabling AI explicitly allows pushing the fallback messages.
 4. **Failure Circuit-Breaker**: If an AI request fails once during a run, remaining commits in that run immediately revert to rule-based generation to prevent slow retries or timeouts.
 5. **Dry-Run Privacy**: Dry runs (`cairn scan` or `cairn run`) never send diffs to external models; they display rule-based estimates.
 
@@ -781,7 +811,8 @@ Running `cairn install --apply` inserts a marked block into your crontab:
 - **Machine Asleep / Offline Catch-Up**: If your laptop or workstation was turned off at 21:00, Cairn will automatically trigger the run during the first 15-minute check or reboot after waking up.
 - **Accurate Timestamps**: Catch-up commits carry the real timestamp of when they were actually created (never backdated).
 - **Network Outage Resilience**: If an internet connection is unavailable, Cairn completes the local commit and records the pending commit SHA in state. On subsequent 15-minute wake-ups, Cairn detects the pending commit and retries the push without re-committing.
-- **Single Run Per Day Guarantee**: Once a repository successfully finishes its daily run, it will not run again until the following calendar day, even if subsequent file changes occur.
+- **Offline AI Messages**: Commits made with fallback messages while AI is enabled are tracked across restarts. Before publishing, Cairn retries AI generation and updates those messages locally; their commit SHAs change, but their snapshots do not. Previously created fallback commits without this tracking are left unchanged.
+- **Single Run Per Day Guarantee**: Once a repository successfully finishes its daily run or a manual Cairn push, scheduled checks skip that repository until the following calendar day, even if subsequent file changes occur. Explicit manual runs remain available. When nothing is due, scheduled runs exit silently; cron still wakes every 15 minutes to handle other repositories and retry unsuccessful pushes.
 
 ---
 

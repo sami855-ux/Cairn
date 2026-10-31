@@ -6,6 +6,7 @@ export interface RepoState {
   lastDone?: string;
   lastPreview?: string;
   pending: string[];
+  awaitingMessages?: string[];
 }
 
 export type State = Record<string, RepoState>;
@@ -32,6 +33,9 @@ export async function loadState(file: string = statePath()): Promise<State> {
       lastDone: text(entry.lastDone),
       lastPreview: text(entry.lastPreview),
       pending: Array.isArray(entry.pending) ? entry.pending.filter((s): s is string => typeof s === 'string') : [],
+      ...(Array.isArray(entry.awaitingMessages) ? {
+        awaitingMessages: entry.awaitingMessages.filter((s): s is string => typeof s === 'string'),
+      } : {}),
     };
   }
   return state;
